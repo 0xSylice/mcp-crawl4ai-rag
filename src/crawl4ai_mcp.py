@@ -404,8 +404,8 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
     """
     try:
         # Get the crawler from the context
-        crawler = ctx.request_context.lifespan_context.crawler
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        crawler = ctx.session.lifespan_context.crawler
+        supabase_client = ctx.session.lifespan_context.supabase_client
         
         # Configure the crawl
         run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
@@ -552,8 +552,8 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
     """
     try:
         # Get the crawler from the context
-        crawler = ctx.request_context.lifespan_context.crawler
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        crawler = ctx.session.lifespan_context.crawler
+        supabase_client = ctx.session.lifespan_context.supabase_client
         
         # Determine the crawl strategy
         crawl_results = []
@@ -743,7 +743,7 @@ async def get_available_sources(ctx: Context) -> str:
     """
     try:
         # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        supabase_client = ctx.session.lifespan_context.supabase_client
         
         # Query the sources table directly
         result = supabase_client.from_('sources')\
@@ -794,7 +794,7 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
     """
     try:
         # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        supabase_client = ctx.session.lifespan_context.supabase_client
         
         # Check if hybrid search is enabled
         use_hybrid_search = os.getenv("USE_HYBRID_SEARCH", "false") == "true"
@@ -880,8 +880,8 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
         
         # Apply reranking if enabled
         use_reranking = os.getenv("USE_RERANKING", "false") == "true"
-        if use_reranking and ctx.request_context.lifespan_context.reranking_model:
-            results = rerank_results(ctx.request_context.lifespan_context.reranking_model, query, results, content_key="content")
+        if use_reranking and ctx.session.lifespan_context.reranking_model:
+            results = rerank_results(ctx.session.lifespan_context.reranking_model, query, results, content_key="content")
         
         # Format the results
         formatted_results = []
@@ -902,7 +902,7 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
             "query": query,
             "source_filter": source,
             "search_mode": "hybrid" if use_hybrid_search else "vector",
-            "reranking_applied": use_reranking and ctx.request_context.lifespan_context.reranking_model is not None,
+            "reranking_applied": use_reranking and ctx.session.lifespan_context.reranking_model is not None,
             "results": formatted_results,
             "count": len(formatted_results)
         }, indent=2)
@@ -943,7 +943,7 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
     
     try:
         # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        supabase_client = ctx.session.lifespan_context.supabase_client
         
         # Check if hybrid search is enabled
         use_hybrid_search = os.getenv("USE_HYBRID_SEARCH", "false") == "true"
@@ -1035,8 +1035,8 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
         
         # Apply reranking if enabled
         use_reranking = os.getenv("USE_RERANKING", "false") == "true"
-        if use_reranking and ctx.request_context.lifespan_context.reranking_model:
-            results = rerank_results(ctx.request_context.lifespan_context.reranking_model, query, results, content_key="content")
+        if use_reranking and ctx.session.lifespan_context.reranking_model:
+            results = rerank_results(ctx.session.lifespan_context.reranking_model, query, results, content_key="content")
         
         # Format the results
         formatted_results = []
@@ -1059,7 +1059,7 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
             "query": query,
             "source_filter": source_id,
             "search_mode": "hybrid" if use_hybrid_search else "vector",
-            "reranking_applied": use_reranking and ctx.request_context.lifespan_context.reranking_model is not None,
+            "reranking_applied": use_reranking and ctx.session.lifespan_context.reranking_model is not None,
             "results": formatted_results,
             "count": len(formatted_results)
         }, indent=2)
@@ -1103,7 +1103,7 @@ async def check_ai_script_hallucinations(ctx: Context, script_path: str) -> str:
             }, indent=2)
         
         # Get the knowledge validator from context
-        knowledge_validator = ctx.request_context.lifespan_context.knowledge_validator
+        knowledge_validator = ctx.session.lifespan_context.knowledge_validator
         
         if not knowledge_validator:
             return json.dumps({
@@ -1242,7 +1242,7 @@ async def query_knowledge_graph(ctx: Context, command: str) -> str:
             }, indent=2)
         
         # Get Neo4j driver from context
-        repo_extractor = ctx.request_context.lifespan_context.repo_extractor
+        repo_extractor = ctx.session.lifespan_context.repo_extractor
         if not repo_extractor or not repo_extractor.driver:
             return json.dumps({
                 "success": False,
@@ -1681,7 +1681,7 @@ async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_l
         }
     
     # Get the repository extractor from context
-    repo_extractor = getattr(getattr(ctx, 'request_context', None), 'lifespan_context', None) and ctx.request_context.lifespan_context.repo_extractor
+    repo_extractor = getattr(getattr(ctx, 'request_context', None), 'lifespan_context', None) and ctx.session.lifespan_context.repo_extractor
     
     if not repo_extractor:
         return {
