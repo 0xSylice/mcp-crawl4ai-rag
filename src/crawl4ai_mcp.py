@@ -183,7 +183,9 @@ async def get_reranking_model(ctx: Crawl4AIContext) -> Optional[CrossEncoder]:
     if ctx.reranking_model is None and os.getenv("USE_RERANKING", "false") == "true":
         try:
             print("Loading reranking model...")
-            ctx.reranking_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            ctx.reranking_model = await asyncio.to_thread(
+                CrossEncoder, "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            )
             print("✓ Reranking model loaded")
         except Exception as e:
             print(f"Failed to load reranking model: {e}")
@@ -200,7 +202,9 @@ async def get_knowledge_validator(ctx: Crawl4AIContext) -> Optional[Any]:
         if neo4j_uri and neo4j_user and neo4j_password:
             try:
                 print("Loading knowledge graph validator...")
-                ctx.knowledge_validator = KnowledgeGraphValidator(neo4j_uri, neo4j_user, neo4j_password)
+                ctx.knowledge_validator = await asyncio.to_thread(
+                    KnowledgeGraphValidator, neo4j_uri, neo4j_user, neo4j_password
+                )
                 await ctx.knowledge_validator.initialize()
                 print("✓ Knowledge graph validator loaded")
             except Exception as e:
@@ -218,7 +222,9 @@ async def get_repo_extractor(ctx: Crawl4AIContext) -> Optional[Any]:
         if neo4j_uri and neo4j_user and neo4j_password:
             try:
                 print("Loading repository extractor...")
-                ctx.repo_extractor = DirectNeo4jExtractor(neo4j_uri, neo4j_user, neo4j_password)
+                ctx.repo_extractor = await asyncio.to_thread(
+                    DirectNeo4jExtractor, neo4j_uri, neo4j_user, neo4j_password
+                )
                 await ctx.repo_extractor.initialize()
                 print("✓ Repository extractor loaded")
             except Exception as e:
