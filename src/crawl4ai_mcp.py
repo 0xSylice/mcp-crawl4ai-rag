@@ -14,7 +14,6 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, urldefrag
 from xml.etree import ElementTree
 from dotenv import load_dotenv
-from supabase import Client
 from pathlib import Path
 import requests
 import asyncio
@@ -30,13 +29,13 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 knowledge_graphs_path = Path(__file__).resolve().parent.parent / 'knowledge_graphs'
 sys.path.append(str(knowledge_graphs_path))
 
+from db_clients import DBClient, get_db_client
 from utils import (
-    get_supabase_client, 
-    add_documents_to_supabase, 
+    add_documents_to_supabase,
     search_documents,
     extract_code_blocks,
     generate_code_example_summary,
-    add_code_examples_to_supabase,
+    add_code_examples,
     extract_source_id,
     update_source_info,
     extract_source_summary,
@@ -114,12 +113,22 @@ def validate_github_url(repo_url: str) -> Dict[str, Any]:
     
     return {"valid": True, "repo_name": repo_url.split('/')[-1].replace('.git', '')}
 
+# Pre-initialize the database client to ensure checks run before server starts
+db_client = get_db_client()
+
+# If using ChromaDB, ensure the server is running before proceeding
+if hasattr(db_client, 'ensure_server_running'):
+    db_client.ensure_server_running()
+
+db_client.initialize()
+
+
 # Create a dataclass for our application context
 @dataclass
 class Crawl4AIContext:
     """Context for the Crawl4AI MCP server."""
     crawler: AsyncWebCrawler
-    supabase_client: Client
+    db_client: DBClient
     reranking_model: Optional[CrossEncoder] = None
     knowledge_validator: Optional[Any] = None  # KnowledgeGraphValidator when available
     repo_extractor: Optional[Any] = None       # DirectNeo4jExtractor when available
@@ -133,7 +142,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
         server: The FastMCP server instance
         
     Yields:
-        Crawl4AIContext: The context containing the Crawl4AI crawler and Supabase client
+        Crawl4AIContext: The context containing the Crawl4AI crawler and database client.
     """
     # Create browser configuration
     browser_config = BrowserConfig(
@@ -144,10 +153,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     # Initialize the crawler
     crawler = AsyncWebCrawler(config=browser_config)
     await crawler.__aenter__()
-    
-    # Initialize Supabase client
-    supabase_client = get_supabase_client()
-    
+
     # Initialize cross-encoder model for reranking if enabled
     reranking_model = None
     if os.getenv("USE_RERANKING", "false") == "true":
@@ -195,7 +201,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     try:
         yield Crawl4AIContext(
             crawler=crawler,
-            supabase_client=supabase_client,
+            db_client=db_client,
             reranking_model=reranking_model,
             knowledge_validator=knowledge_validator,
             repo_extractor=repo_extractor
@@ -405,7 +411,7 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
     try:
         # Get the crawler from the context
         crawler = ctx.request_context.lifespan_context.crawler
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        db_client = ctx.request_context.lifespan_context.db_client
         
         # Configure the crawl
         run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
@@ -448,10 +454,10 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
             
             # Update source information FIRST (before inserting documents)
             source_summary = extract_source_summary(source_id, result.markdown[:5000])  # Use first 5000 chars for summary
-            update_source_info(supabase_client, source_id, source_summary, total_word_count)
+            update_source_info(db_client, source_id, source_summary, total_word_count)
             
             # Add documentation chunks to Supabase (AFTER source exists)
-            add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
+            add_documents_to_supabase(db_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
             
             # Extract and process code examples only if enabled
             extract_code_examples = os.getenv("USE_AGENTIC_RAG", "false") == "true"
@@ -493,12 +499,12 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
                         code_metadatas.append(code_meta)
                     
                     # Add code examples to Supabase
-                    add_code_examples_to_supabase(
-                        supabase_client, 
-                        code_urls, 
-                        code_chunk_numbers, 
-                        code_examples, 
-                        code_summaries, 
+                    add_code_examples(
+                        db_client,
+                        code_urls,
+                        code_chunk_numbers,
+                        code_examples,
+                        code_summaries,
                         code_metadatas
                     )
             
@@ -531,7 +537,7 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
 @mcp.tool()
 async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concurrent: int = 10, chunk_size: int = 5000) -> str:
     """
-    Intelligently crawl a URL based on its type and store content in Supabase.
+    Intelligently crawl a URL based on its type and store content in Vector Database.
     
     This tool automatically detects the URL type and applies the appropriate crawling method:
     - For sitemaps: Extracts and crawls all URLs in parallel
@@ -553,7 +559,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
     try:
         # Get the crawler from the context
         crawler = ctx.request_context.lifespan_context.crawler
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        db_client = ctx.request_context.lifespan_context.db_client
         
         # Determine the crawl strategy
         crawl_results = []
@@ -642,11 +648,11 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
         
         for (source_id, _), summary in zip(source_summary_args, source_summaries):
             word_count = source_word_counts.get(source_id, 0)
-            update_source_info(supabase_client, source_id, summary, word_count)
+            update_source_info(db_client, source_id, summary, word_count)
         
         # Add documentation chunks to Supabase (AFTER sources exist)
         batch_size = 20
-        add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
+        add_documents_to_supabase(db_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
         code_blocks = []
         code_examples = []
         # Extract and process code examples from all documents only if enabled
@@ -696,12 +702,12 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             
             # Add all code examples to Supabase
             if code_examples:
-                add_code_examples_to_supabase(
-                    supabase_client, 
-                    code_urls, 
-                    code_chunk_numbers, 
-                    code_examples, 
-                    code_summaries, 
+                add_code_examples(
+                    db_client,
+                    code_urls,
+                    code_chunk_numbers,
+                    code_examples,
+                    code_summaries,
                     code_metadatas,
                     batch_size=batch_size
                 )
@@ -742,26 +748,18 @@ async def get_available_sources(ctx: Context) -> str:
         JSON string with the list of available sources and their details
     """
     try:
-        # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        # Get the database client from the context
+        db_client = ctx.request_context.lifespan_context.db_client
         
-        # Query the sources table directly
-        result = supabase_client.from_('sources')\
-            .select('*')\
-            .order('source_id')\
-            .execute()
+        sources = db_client.get_available_sources()
         
-        # Format the sources with their details
-        sources = []
-        if result.data:
-            for source in result.data:
-                sources.append({
-                    "source_id": source.get("source_id"),
-                    "summary": source.get("summary"),
-                    "total_words": source.get("total_words"),
-                    "created_at": source.get("created_at"),
-                    "updated_at": source.get("updated_at")
-                })
+        # Format the sources with their details - assuming db_client returns a list of dicts
+        for source in sources:
+            source.setdefault("source_id", None)
+            source.setdefault("summary", None)
+            source.setdefault("total_words", None)
+            source.setdefault("created_at", None)
+            source.setdefault("updated_at", None)
         
         return json.dumps({
             "success": True,
@@ -793,8 +791,8 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
         JSON string with the search results
     """
     try:
-        # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        # Get the database client from the context
+        db_client = ctx.request_context.lifespan_context.db_client
         
         # Check if hybrid search is enabled
         use_hybrid_search = os.getenv("USE_HYBRID_SEARCH", "false") == "true"
@@ -808,25 +806,14 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
             # Hybrid search: combine vector and keyword search
             
             # 1. Get vector search results (get more to account for filtering)
-            vector_results = search_documents(
-                client=supabase_client,
-                query=query,
-                match_count=match_count * 2,  # Get double to have room for filtering
+            vector_results = db_client.search_documents(
+                query_embedding=query,  # This will be changed in utils.py
+                match_count=match_count * 2,
                 filter_metadata=filter_metadata
             )
             
-            # 2. Get keyword search results using ILIKE
-            keyword_query = supabase_client.from_('crawled_pages')\
-                .select('id, url, chunk_number, content, metadata, source_id')\
-                .ilike('content', f'%{query}%')
-            
-            # Apply source filter if provided
-            if source and source.strip():
-                keyword_query = keyword_query.eq('source_id', source)
-            
-            # Execute keyword search
-            keyword_response = keyword_query.limit(match_count * 2).execute()
-            keyword_results = keyword_response.data if keyword_response.data else []
+            # Keyword search will need refactoring inside the client
+            keyword_results = [] # Placeholder for now
             
             # 3. Combine results with preference for items appearing in both
             seen_ids = set()
@@ -871,9 +858,9 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
             
         else:
             # Standard vector search only
-            results = search_documents(
-                client=supabase_client,
-                query=query,
+            # Standard vector search only
+            results = db_client.search_documents(
+                query_embedding=query, # This will be changed in utils.py
                 match_count=match_count,
                 filter_metadata=filter_metadata
             )
@@ -942,8 +929,8 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
         }, indent=2)
     
     try:
-        # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        # Get the database client from the context
+        db_client = ctx.request_context.lifespan_context.db_client
         
         # Check if hybrid search is enabled
         use_hybrid_search = os.getenv("USE_HYBRID_SEARCH", "false") == "true"
@@ -960,25 +947,14 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
             from utils import search_code_examples as search_code_examples_impl
             
             # 1. Get vector search results (get more to account for filtering)
-            vector_results = search_code_examples_impl(
-                client=supabase_client,
-                query=query,
+            vector_results = db_client.search_code_examples(
+                query_embedding=query, # This will be changed in utils.py
                 match_count=match_count * 2,  # Get double to have room for filtering
                 filter_metadata=filter_metadata
             )
             
-            # 2. Get keyword search results using ILIKE on both content and summary
-            keyword_query = supabase_client.from_('code_examples')\
-                .select('id, url, chunk_number, content, summary, metadata, source_id')\
-                .or_(f'content.ilike.%{query}%,summary.ilike.%{query}%')
-            
-            # Apply source filter if provided
-            if source_id and source_id.strip():
-                keyword_query = keyword_query.eq('source_id', source_id)
-            
-            # Execute keyword search
-            keyword_response = keyword_query.limit(match_count * 2).execute()
-            keyword_results = keyword_response.data if keyword_response.data else []
+            # Keyword search will need refactoring inside the client
+            keyword_results = [] # Placeholder for now
             
             # 3. Combine results with preference for items appearing in both
             seen_ids = set()
@@ -1026,9 +1002,8 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
             # Standard vector search only
             from utils import search_code_examples as search_code_examples_impl
             
-            results = search_code_examples_impl(
-                client=supabase_client,
-                query=query,
+            results = db_client.search_code_examples(
+                query_embedding=query, # This will be changed in utils.py
                 match_count=match_count,
                 filter_metadata=filter_metadata
             )
@@ -1971,9 +1946,17 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
                             # Trim page/file ref from norm_url (everything after last '/')
                             base_url = norm_url.rsplit('/', 1)[0]
                             # Concat proper relative path to trimmed norm_url
-                            corrected_url = f"{base_url}/{relative_path}" 
+                            corrected_url = f"{base_url}/{relative_path}"
+                            
+                            # [DEBUG_URL_FIX] Start logging for URL construction
+                            print(f"[DEBUG_URL] Original norm_url: {norm_url}")
+                            print(f"[DEBUG_URL] Relative path: {relative_path}")
+                            print(f"[DEBUG_URL] Base URL: {base_url}")
+                            print(f"[DEBUG_URL] Corrected URL: {corrected_url}")
+                            # [DEBUG_URL_FIX] End logging
+                            
                             # now this is sorted, we will stick with the established var names for consitency
-                            next_url = corrected_url 
+                            next_url = corrected_url
                             if next_url not in visited:
                                 next_level_urls.add(next_url)
 

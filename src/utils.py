@@ -5,9 +5,16 @@ import os
 import concurrent.futures
 from typing import List, Dict, Any, Optional, Tuple
 import json
-from supabase import create_client, Client
 from urllib.parse import urlparse
 import openai
+import sys
+from pathlib import Path
+
+# Add project root to path to allow absolute imports
+project_root = Path(__file__).resolve().parent.parent
+sys.path.append(str(project_root))
+
+from db_clients import DBClient
 import re
 import time
 import threading
@@ -56,21 +63,6 @@ def extract_source_id(url: str) -> str:
     
     # Default behavior for non-GitHub URLs
     return parsed_url.netloc or parsed_url.path
-
-def get_supabase_client() -> Client:
-    """
-    Get a Supabase client with the URL and key from environment variables.
-    
-    Returns:
-        Supabase client instance
-    """
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_KEY")
-    
-    if not url or not key:
-        raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in environment variables")
-    
-    return create_client(url, key)
 
 def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
     """
@@ -211,8 +203,8 @@ def process_chunk_with_context(args):
     return generate_contextual_embedding(full_document, content)
 
 def add_documents_to_supabase(
-    client: Client, 
-    urls: List[str], 
+    client: DBClient,
+    urls: List[str],
     chunk_numbers: List[int],
     contents: List[str], 
     metadatas: List[Dict[str, Any]],
@@ -224,7 +216,7 @@ def add_documents_to_supabase(
     Deletes existing records with the same URLs before inserting to prevent duplicates.
     
     Args:
-        client: Supabase client
+        client: DBClient instance (Supabase or Chroma)
         urls: List of URLs
         chunk_numbers: List of chunk numbers
         contents: List of document contents
@@ -232,23 +224,7 @@ def add_documents_to_supabase(
         url_to_full_document: Dictionary mapping URLs to their full document content
         batch_size: Size of each batch for insertion
     """
-    # Get unique URLs to delete existing records
-    unique_urls = list(set(urls))
-    
-    # Delete existing records for these URLs in a single operation
-    try:
-        if unique_urls:
-            # Use the .in_() filter to delete all records with matching URLs
-            client.table("crawled_pages").delete().in_("url", unique_urls).execute()
-    except Exception as e:
-        print(f"Batch delete failed: {e}. Trying one-by-one deletion as fallback.")
-        # Fallback: delete records one by one
-        for url in unique_urls:
-            try:
-                client.table("crawled_pages").delete().eq("url", url).execute()
-            except Exception as inner_e:
-                print(f"Error deleting record for URL {url}: {inner_e}")
-                # Continue with the next URL even if one fails
+    # Deletion and batching logic is now handled by the specific client implementation.
     
     # Check if MODEL_CHOICE is set for contextual embeddings
     use_contextual_embeddings = os.getenv("USE_CONTEXTUAL_EMBEDDINGS", "false") == "true"
@@ -328,48 +304,32 @@ def add_documents_to_supabase(
             
             batch_data.append(data)
         
-        # Insert batch into Supabase with retry logic
-        max_retries = 3
-        retry_delay = 1.0  # Start with 1 second delay
-        
-        for retry in range(max_retries):
-            try:
-                client.table("crawled_pages").insert(batch_data).execute()
-                # Success - break out of retry loop
-                break
-            except Exception as e:
-                if retry < max_retries - 1:
-                    print(f"Error inserting batch into Supabase (attempt {retry + 1}/{max_retries}): {e}")
-                    print(f"Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                else:
-                    # Final attempt failed
-                    print(f"Failed to insert batch after {max_retries} attempts: {e}")
-                    # Optionally, try inserting records one by one as a last resort
-                    print("Attempting to insert records individually...")
-                    successful_inserts = 0
-                    for record in batch_data:
-                        try:
-                            client.table("crawled_pages").insert(record).execute()
-                            successful_inserts += 1
-                        except Exception as individual_error:
-                            print(f"Failed to insert individual record for URL {record['url']}: {individual_error}")
-                    
-                    if successful_inserts > 0:
-                        print(f"Successfully inserted {successful_inserts}/{len(batch_data)} records individually")
+        # This function will now pass the full list to the client,
+        # which is responsible for batching and retries.
+        try:
+            client.add_documents(
+                urls=urls,
+                chunk_numbers=chunk_numbers,
+                contents=contents,
+                metadatas=metadatas,
+                embeddings=create_embeddings_batch(contents)
+            )
+            print(f"Successfully processed {len(urls)} documents.")
+        except Exception as e:
+            print(f"Error processing documents: {e}")
+
 
 def search_documents(
-    client: Client, 
-    query: str, 
-    match_count: int = 10, 
+    client: DBClient,
+    query: str,
+    match_count: int = 10,
     filter_metadata: Optional[Dict[str, Any]] = None
 ) -> List[Dict[str, Any]]:
     """
     Search for documents in Supabase using vector similarity.
     
     Args:
-        client: Supabase client
+        client: DBClient instance (Supabase or Chroma)
         query: Query text
         match_count: Maximum number of results to return
         filter_metadata: Optional metadata filter
@@ -382,19 +342,11 @@ def search_documents(
     
     # Execute the search using the match_crawled_pages function
     try:
-        # Only include filter parameter if filter_metadata is provided and not empty
-        params = {
-            'query_embedding': query_embedding,
-            'match_count': match_count
-        }
-        
-        # Only add the filter if it's actually provided and not empty
-        if filter_metadata:
-            params['filter'] = filter_metadata  # Pass the dictionary directly, not JSON-encoded
-        
-        result = client.rpc('match_crawled_pages', params).execute()
-        
-        return result.data
+        return client.search_documents(
+            query_embedding=query_embedding,
+            match_count=match_count,
+            filter_metadata=filter_metadata
+        )
     except Exception as e:
         print(f"Error searching documents: {e}")
         return []
@@ -531,8 +483,8 @@ Based on the code example and its surrounding context, provide a concise summary
         return "Code example for demonstration purposes."
 
 
-def add_code_examples_to_supabase(
-    client: Client,
+def add_code_examples(
+    client: DBClient,
     urls: List[str],
     chunk_numbers: List[int],
     code_examples: List[str],
@@ -544,7 +496,7 @@ def add_code_examples_to_supabase(
     Add code examples to the Supabase code_examples table in batches.
     
     Args:
-        client: Supabase client
+        client: DBClient instance
         urls: List of URLs
         chunk_numbers: List of chunk numbers
         code_examples: List of code example contents
@@ -555,15 +507,7 @@ def add_code_examples_to_supabase(
     if not urls:
         return
         
-    # Delete existing records for these URLs
-    unique_urls = list(set(urls))
-    for url in unique_urls:
-        try:
-            client.table('code_examples').delete().eq('url', url).execute()
-        except Exception as e:
-            print(f"Error deleting existing code examples for {url}: {e}")
-    
-    # Process in batches
+    # Deletion and batching logic is now handled by the specific client implementation.
     total_items = len(urls)
     for i in range(0, total_items, batch_size):
         batch_end = min(i + batch_size, total_items)
@@ -606,68 +550,36 @@ def add_code_examples_to_supabase(
                 'embedding': embedding
             })
         
-        # Insert batch into Supabase with retry logic
-        max_retries = 3
-        retry_delay = 1.0  # Start with 1 second delay
-        
-        for retry in range(max_retries):
-            try:
-                client.table('code_examples').insert(batch_data).execute()
-                # Success - break out of retry loop
-                break
-            except Exception as e:
-                if retry < max_retries - 1:
-                    print(f"Error inserting batch into Supabase (attempt {retry + 1}/{max_retries}): {e}")
-                    print(f"Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                else:
-                    # Final attempt failed
-                    print(f"Failed to insert batch after {max_retries} attempts: {e}")
-                    # Optionally, try inserting records one by one as a last resort
-                    print("Attempting to insert records individually...")
-                    successful_inserts = 0
-                    for record in batch_data:
-                        try:
-                            client.table('code_examples').insert(record).execute()
-                            successful_inserts += 1
-                        except Exception as individual_error:
-                            print(f"Failed to insert individual record for URL {record['url']}: {individual_error}")
-                    
-                    if successful_inserts > 0:
-                        print(f"Successfully inserted {successful_inserts}/{len(batch_data)} records individually")
-        print(f"Inserted batch {i//batch_size + 1} of {(total_items + batch_size - 1)//batch_size} code examples")
+    # This function will now pass the full list to the client.
+    combined_texts = [f"{c}\n\nSummary: {s}" for c, s in zip(code_examples, summaries)]
+    embeddings = create_embeddings_batch(combined_texts)
+    
+    try:
+        client.add_code_examples(
+            urls=urls,
+            chunk_numbers=chunk_numbers,
+            contents=code_examples,
+            summaries=summaries,
+            metadatas=metadatas,
+            embeddings=embeddings
+        )
+        print(f"Successfully processed {len(urls)} code examples.")
+    except Exception as e:
+        print(f"Error processing code examples: {e}")
 
 
-def update_source_info(client: Client, source_id: str, summary: str, word_count: int):
+def update_source_info(client: DBClient, source_id: str, summary: str, word_count: int):
     """
     Update or insert source information in the sources table.
     
     Args:
-        client: Supabase client
+        client: DBClient instance
         source_id: The source ID (domain)
         summary: Summary of the source
         word_count: Total word count for the source
     """
     try:
-        # Try to update existing source
-        result = client.table('sources').update({
-            'summary': summary,
-            'total_word_count': word_count,
-            'updated_at': 'now()'
-        }).eq('source_id', source_id).execute()
-        
-        # If no rows were updated, insert new source
-        if not result.data:
-            client.table('sources').insert({
-                'source_id': source_id,
-                'summary': summary,
-                'total_word_count': word_count
-            }).execute()
-            print(f"Created new source: {source_id}")
-        else:
-            print(f"Updated source: {source_id}")
-            
+        client.update_source_info(source_id, summary, word_count)
     except Exception as e:
         print(f"Error updating source {source_id}: {e}")
 
@@ -734,9 +646,9 @@ The above content is from the documentation for '{source_id}'. Please provide a 
 
 
 def search_code_examples(
-    client: Client, 
-    query: str, 
-    match_count: int = 10, 
+    client: DBClient,
+    query: str,
+    match_count: int = 10,
     filter_metadata: Optional[Dict[str, Any]] = None,
     source_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
@@ -744,7 +656,7 @@ def search_code_examples(
     Search for code examples in Supabase using vector similarity.
     
     Args:
-        client: Supabase client
+        client: DBClient instance
         query: Query text
         match_count: Maximum number of results to return
         filter_metadata: Optional metadata filter
@@ -762,23 +674,17 @@ def search_code_examples(
     
     # Execute the search using the match_code_examples function
     try:
-        # Only include filter parameter if filter_metadata is provided and not empty
-        params = {
-            'query_embedding': query_embedding,
-            'match_count': match_count
-        }
-        
-        # Only add the filter if it's actually provided and not empty
-        if filter_metadata:
-            params['filter'] = filter_metadata
-            
-        # Add source filter if provided
+        # The source_id filter needs to be merged into the metadata filter for Chroma
         if source_id:
-            params['source_filter'] = source_id
-        
-        result = client.rpc('match_code_examples', params).execute()
-        
-        return result.data
+            if filter_metadata is None:
+                filter_metadata = {}
+            filter_metadata['source'] = source_id
+
+        return client.search_code_examples(
+            query_embedding=query_embedding,
+            match_count=match_count,
+            filter_metadata=filter_metadata
+        )
     except Exception as e:
         print(f"Error searching code examples: {e}")
         return []
