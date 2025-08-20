@@ -1,5 +1,6 @@
 .env
 .venv
+.kilocode
 __pycache__
 crawl4ai_mcp.egg-info
 repos
