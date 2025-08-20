@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, urldefrag
 from xml.etree import ElementTree
 from dotenv import load_dotenv
-from supabase import Client
+from chromadb.api import ClientAPI
 from pathlib import Path
 import requests
 import asyncio
@@ -31,16 +31,17 @@ knowledge_graphs_path = Path(__file__).resolve().parent.parent / 'knowledge_grap
 sys.path.append(str(knowledge_graphs_path))
 
 from utils import (
-    get_supabase_client, 
-    add_documents_to_supabase, 
+    get_chroma_client,
+    add_documents_to_chroma,
     search_documents,
     extract_code_blocks,
     generate_code_example_summary,
-    add_code_examples_to_supabase,
+    add_code_examples_to_chroma,
     extract_source_id,
     update_source_info,
     extract_source_summary,
     search_code_examples,
+    get_available_sources,
     LLM_MAX_CONCURRENCY
 )
 
@@ -119,7 +120,7 @@ def validate_github_url(repo_url: str) -> Dict[str, Any]:
 class Crawl4AIContext:
     """Context for the Crawl4AI MCP server."""
     crawler: AsyncWebCrawler
-    supabase_client: Client
+    chroma_client: ClientAPI
     reranking_model: Optional[CrossEncoder] = None
     knowledge_validator: Optional[Any] = None  # KnowledgeGraphValidator when available
     repo_extractor: Optional[Any] = None       # DirectNeo4jExtractor when available
@@ -133,7 +134,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
         server: The FastMCP server instance
         
     Yields:
-        Crawl4AIContext: The context containing the Crawl4AI crawler and Supabase client
+        Crawl4AIContext: The context containing the Crawl4AI crawler and Chroma client
     """
     # Create browser configuration
     browser_config = BrowserConfig(
@@ -145,8 +146,8 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     crawler = AsyncWebCrawler(config=browser_config)
     await crawler.__aenter__()
     
-    # Initialize Supabase client
-    supabase_client = get_supabase_client()
+    # Initialize Chroma client
+    chroma_client = get_chroma_client()
     
     # Initialize cross-encoder model for reranking if enabled
     reranking_model = None
@@ -195,7 +196,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     try:
         yield Crawl4AIContext(
             crawler=crawler,
-            supabase_client=supabase_client,
+            chroma_client=chroma_client,
             reranking_model=reranking_model,
             knowledge_validator=knowledge_validator,
             repo_extractor=repo_extractor
@@ -390,22 +391,22 @@ def process_code_example(args):
 @mcp.tool()
 async def crawl_single_page(ctx: Context, url: str) -> str:
     """
-    Crawl a single web page and store its content in Supabase.
+    Crawl a single web page and store its content in Chroma.
     
     This tool is ideal for quickly retrieving content from a specific URL without following links.
-    The content is stored in Supabase for later retrieval and querying.
+    The content is stored in Chroma for later retrieval and querying.
     
     Args:
         ctx: The MCP server provided context
         url: URL of the web page to crawl
     
     Returns:
-        Summary of the crawling operation and storage in Supabase
+        Summary of the crawling operation and storage in Chroma
     """
     try:
         # Get the crawler from the context
         crawler = ctx.request_context.lifespan_context.crawler
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        chroma_client = ctx.request_context.lifespan_context.chroma_client
         
         # Configure the crawl
         run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
@@ -420,7 +421,7 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
             # Chunk the content
             chunks = smart_chunk_markdown(result.markdown)
             
-            # Prepare data for Supabase
+            # Prepare data for Chroma
             urls = []
             chunk_numbers = []
             contents = []
@@ -448,10 +449,10 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
             
             # Update source information FIRST (before inserting documents)
             source_summary = extract_source_summary(source_id, result.markdown[:5000])  # Use first 5000 chars for summary
-            update_source_info(supabase_client, source_id, source_summary, total_word_count)
+            update_source_info(chroma_client, source_id, source_summary, total_word_count)
             
-            # Add documentation chunks to Supabase (AFTER source exists)
-            add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
+            # Add documentation chunks to Chroma (AFTER source exists)
+            add_documents_to_chroma(chroma_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
             
             # Extract and process code examples only if enabled
             extract_code_examples = os.getenv("USE_AGENTIC_RAG", "false") == "true"
@@ -492,13 +493,13 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
                         }
                         code_metadatas.append(code_meta)
                     
-                    # Add code examples to Supabase
-                    add_code_examples_to_supabase(
-                        supabase_client, 
-                        code_urls, 
-                        code_chunk_numbers, 
-                        code_examples, 
-                        code_summaries, 
+                    # Add code examples to Chroma
+                    add_code_examples_to_chroma(
+                        chroma_client,
+                        code_urls,
+                        code_chunk_numbers,
+                        code_examples,
+                        code_summaries,
                         code_metadatas
                     )
             
@@ -531,14 +532,14 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
 @mcp.tool()
 async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concurrent: int = 10, chunk_size: int = 5000) -> str:
     """
-    Intelligently crawl a URL based on its type and store content in Supabase.
+    Intelligently crawl a URL based on its type and store content in Chroma.
     
     This tool automatically detects the URL type and applies the appropriate crawling method:
     - For sitemaps: Extracts and crawls all URLs in parallel
     - For text files (llms.txt): Directly retrieves the content
     - For regular webpages: Recursively crawls internal links up to the specified depth
     
-    All crawled content is chunked and stored in Supabase for later retrieval and querying.
+    All crawled content is chunked and stored in Chroma for later retrieval and querying.
     
     Args:
         ctx: The MCP server provided context
@@ -553,7 +554,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
     try:
         # Get the crawler from the context
         crawler = ctx.request_context.lifespan_context.crawler
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        chroma_client = ctx.request_context.lifespan_context.chroma_client
         
         # Determine the crawl strategy
         crawl_results = []
@@ -586,7 +587,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                 "error": "No content found"
             }, indent=2)
         
-        # Process results and store in Supabase
+        # Process results and store in Chroma
         urls = []
         chunk_numbers = []
         contents = []
@@ -642,11 +643,11 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
         
         for (source_id, _), summary in zip(source_summary_args, source_summaries):
             word_count = source_word_counts.get(source_id, 0)
-            update_source_info(supabase_client, source_id, summary, word_count)
+            update_source_info(chroma_client, source_id, summary, word_count)
         
-        # Add documentation chunks to Supabase (AFTER sources exist)
+        # Add documentation chunks to Chroma (AFTER sources exist)
         batch_size = 20
-        add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
+        add_documents_to_chroma(chroma_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
         code_blocks = []
         code_examples = []
         # Extract and process code examples from all documents only if enabled
@@ -694,10 +695,10 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                         }
                         code_metadatas.append(code_meta)
             
-            # Add all code examples to Supabase
+            # Add all code examples to Chroma
             if code_examples:
-                add_code_examples_to_supabase(
-                    supabase_client, 
+                add_code_examples_to_chroma(
+                    chroma_client, 
                     code_urls, 
                     code_chunk_numbers, 
                     code_examples, 
@@ -742,26 +743,11 @@ async def get_available_sources(ctx: Context) -> str:
         JSON string with the list of available sources and their details
     """
     try:
-        # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        # Get the Chroma client from the context
+        chroma_client = ctx.request_context.lifespan_context.chroma_client
         
-        # Query the sources table directly
-        result = supabase_client.from_('sources')\
-            .select('*')\
-            .order('source_id')\
-            .execute()
-        
-        # Format the sources with their details
-        sources = []
-        if result.data:
-            for source in result.data:
-                sources.append({
-                    "source_id": source.get("source_id"),
-                    "summary": source.get("summary"),
-                    "total_words": source.get("total_words"),
-                    "created_at": source.get("created_at"),
-                    "updated_at": source.get("updated_at")
-                })
+        # Get sources from Chroma collection
+        sources = get_available_sources(chroma_client)
         
         return json.dumps({
             "success": True,
@@ -793,8 +779,8 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
         JSON string with the search results
     """
     try:
-        # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        # Get the Chroma client from the context
+        chroma_client = ctx.request_context.lifespan_context.chroma_client
         
         # Check if hybrid search is enabled
         use_hybrid_search = os.getenv("USE_HYBRID_SEARCH", "false") == "true"
@@ -809,24 +795,42 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
             
             # 1. Get vector search results (get more to account for filtering)
             vector_results = search_documents(
-                client=supabase_client,
+                client=chroma_client,
                 query=query,
                 match_count=match_count * 2,  # Get double to have room for filtering
                 filter_metadata=filter_metadata
             )
             
-            # 2. Get keyword search results using ILIKE
-            keyword_query = supabase_client.from_('crawled_pages')\
-                .select('id, url, chunk_number, content, metadata, source_id')\
-                .ilike('content', f'%{query}%')
+            # 2. For hybrid search in Chroma, we'll use the vector search as the primary method
+            # and apply keyword filtering in post-processing since Chroma doesn't have ILIKE operations
+            keyword_results = []
             
-            # Apply source filter if provided
-            if source and source.strip():
-                keyword_query = keyword_query.eq('source_id', source)
-            
-            # Execute keyword search
-            keyword_response = keyword_query.limit(match_count * 2).execute()
-            keyword_results = keyword_response.data if keyword_response.data else []
+            # Get all documents for keyword matching (with source filter if provided)
+            try:
+                collection = chroma_client.get_collection("crawled_pages")
+                # Get more results for keyword filtering
+                all_results = collection.query(
+                    query_texts=[query],
+                    n_results=min(match_count * 4, collection.count()),  # Get more for keyword filtering
+                    where={"source": source} if source and source.strip() else None
+                )
+                
+                # Filter results that contain the query keywords
+                if all_results["documents"]:
+                    query_lower = query.lower()
+                    for i, doc in enumerate(all_results["documents"][0]):
+                        if query_lower in doc.lower():
+                            keyword_results.append({
+                                'id': all_results["ids"][0][i],
+                                'url': all_results["metadatas"][0][i].get("url"),
+                                'chunk_number': all_results["metadatas"][0][i].get("chunk_index"),
+                                'content': doc,
+                                'metadata': all_results["metadatas"][0][i],
+                                'source_id': all_results["metadatas"][0][i].get("source")
+                            })
+            except Exception as e:
+                print(f"Keyword search failed: {e}")
+                keyword_results = []
             
             # 3. Combine results with preference for items appearing in both
             seen_ids = set()
@@ -872,7 +876,7 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
         else:
             # Standard vector search only
             results = search_documents(
-                client=supabase_client,
+                client=chroma_client,
                 query=query,
                 match_count=match_count,
                 filter_metadata=filter_metadata
@@ -942,8 +946,8 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
         }, indent=2)
     
     try:
-        # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        # Get the Chroma client from the context
+        chroma_client = ctx.request_context.lifespan_context.chroma_client
         
         # Check if hybrid search is enabled
         use_hybrid_search = os.getenv("USE_HYBRID_SEARCH", "false") == "true"
@@ -956,29 +960,52 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
         if use_hybrid_search:
             # Hybrid search: combine vector and keyword search
             
-            # Import the search function from utils
-            from utils import search_code_examples as search_code_examples_impl
+            # Use the search function from chroma_utils
+            from chroma_utils import search_code_examples as search_code_examples_impl
             
             # 1. Get vector search results (get more to account for filtering)
             vector_results = search_code_examples_impl(
-                client=supabase_client,
+                client=chroma_client,
                 query=query,
                 match_count=match_count * 2,  # Get double to have room for filtering
                 filter_metadata=filter_metadata
             )
             
-            # 2. Get keyword search results using ILIKE on both content and summary
-            keyword_query = supabase_client.from_('code_examples')\
-                .select('id, url, chunk_number, content, summary, metadata, source_id')\
-                .or_(f'content.ilike.%{query}%,summary.ilike.%{query}%')
+            # 2. For hybrid search in Chroma, we'll use the vector search as the primary method
+            # and apply keyword filtering in post-processing since Chroma doesn't have ILIKE operations
+            keyword_results = []
             
-            # Apply source filter if provided
-            if source_id and source_id.strip():
-                keyword_query = keyword_query.eq('source_id', source_id)
-            
-            # Execute keyword search
-            keyword_response = keyword_query.limit(match_count * 2).execute()
-            keyword_results = keyword_response.data if keyword_response.data else []
+            # Get all code examples for keyword matching (with source filter if provided)
+            try:
+                collection = chroma_client.get_collection("code_examples")
+                # Get more results for keyword filtering
+                all_results = collection.query(
+                    query_texts=[query],
+                    n_results=min(match_count * 4, collection.count()),  # Get more for keyword filtering
+                    where={"source": source_id} if source_id and source_id.strip() else None
+                )
+                
+                # Filter results that contain the query keywords in content or summary
+                if all_results["documents"]:
+                    query_lower = query.lower()
+                    for i, doc in enumerate(all_results["documents"][0]):
+                        content_match = query_lower in doc.lower()
+                        summary = all_results["metadatas"][0][i].get("summary", "")
+                        summary_match = query_lower in summary.lower() if summary else False
+                        
+                        if content_match or summary_match:
+                            keyword_results.append({
+                                'id': all_results["ids"][0][i],
+                                'url': all_results["metadatas"][0][i].get("url"),
+                                'chunk_number': all_results["metadatas"][0][i].get("chunk_index"),
+                                'content': doc,
+                                'summary': all_results["metadatas"][0][i].get("summary"),
+                                'metadata': all_results["metadatas"][0][i],
+                                'source_id': all_results["metadatas"][0][i].get("source")
+                            })
+            except Exception as e:
+                print(f"Keyword search failed: {e}")
+                keyword_results = []
             
             # 3. Combine results with preference for items appearing in both
             seen_ids = set()
@@ -1024,10 +1051,10 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
             
         else:
             # Standard vector search only
-            from utils import search_code_examples as search_code_examples_impl
+            from chroma_utils import search_code_examples as search_code_examples_impl
             
             results = search_code_examples_impl(
-                client=supabase_client,
+                client=chroma_client,
                 query=query,
                 match_count=match_count,
                 filter_metadata=filter_metadata

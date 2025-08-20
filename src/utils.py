@@ -2,15 +2,19 @@
 Utility functions for the Crawl4AI MCP server.
 """
 import os
-import concurrent.futures
-from typing import List, Dict, Any, Optional, Tuple
+import sys
 import json
-from supabase import create_client, Client
-from urllib.parse import urlparse
-import openai
-import re
 import time
+import subprocess
 import threading
+from typing import List, Dict, Any, Optional, Tuple
+from urllib.parse import urlparse
+import requests
+import openai
+import chromadb
+from chromadb.config import Settings
+from chromadb.api import ClientAPI
+from chromadb.api.models.Collection import Collection
 
 # Load OpenAI API key for embeddings
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -19,6 +23,50 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 LLM_MAX_CONCURRENCY = int(os.getenv("LLM_MAX_CONCURRENCY", "3"))
 LLM_REQUEST_DELAY = float(os.getenv("LLM_REQUEST_DELAY", "0"))
 _llm_semaphore = threading.Semaphore(LLM_MAX_CONCURRENCY)
+
+# Chroma collection schema definitions matching SQL tables exactly
+CHROMA_COLLECTIONS = {
+    "sources": {
+        "has_embeddings": False,
+        "metadata_schema": {
+            "source_id": str,      # Primary key equivalent
+            "summary": str,        # Source description
+            "total_word_count": int,  # Aggregate word count
+            "created_at": str,     # ISO timestamp
+            "updated_at": str      # ISO timestamp
+        },
+        "unique_constraint": ["source_id"]  # Equivalent to SQL primary key
+    },
+    "crawled_pages": {
+        "has_embeddings": True,
+        "embedding_function": "openai",  # text-embedding-3-small
+        "embedding_dimension": 1536,
+        "metadata_schema": {
+            "url": str,
+            "chunk_number": int,
+            "content": str,        # Full text content
+            "metadata": dict,      # Original JSON metadata
+            "source_id": str,      # Foreign key to sources
+            "created_at": str
+        },
+        "unique_constraint": ["url", "chunk_number"]  # Composite unique key
+    },
+    "code_examples": {
+        "has_embeddings": True,
+        "embedding_function": "openai",  # text-embedding-3-small
+        "embedding_dimension": 1536,
+        "metadata_schema": {
+            "url": str,
+            "chunk_number": int,
+            "content": str,        # Code content
+            "summary": str,        # Code description
+            "metadata": dict,      # Original JSON metadata
+            "source_id": str,      # Foreign key to sources
+            "created_at": str
+        },
+        "unique_constraint": ["url", "chunk_number"]  # Composite unique key
+    }
+}
 
 def _with_llm_limits(func, *args, **kwargs):
     """Call OpenAI API with concurrency limits and optional delay."""
@@ -57,20 +105,251 @@ def extract_source_id(url: str) -> str:
     # Default behavior for non-GitHub URLs
     return parsed_url.netloc or parsed_url.path
 
-def get_supabase_client() -> Client:
+def check_chroma_server_heartbeat(host: str, port: int, timeout: int = 5) -> bool:
     """
-    Get a Supabase client with the URL and key from environment variables.
+    Check if a Chroma server is running and responsive.
+    
+    Args:
+        host: Chroma server host
+        port: Chroma server port
+        timeout: Request timeout in seconds
+        
+    Returns:
+        True if server is responsive, False otherwise
+    """
+    try:
+        # Use Chroma v2 API heartbeat endpoint
+        url = f"http://{host}:{port}/api/v2/heartbeat"
+        response = requests.get(url, timeout=timeout)
+        
+        # Check if response is successful and contains expected heartbeat data
+        if response.status_code == 200:
+            # Chroma v2 heartbeat returns nanosecond timestamp
+            data = response.json()
+            return isinstance(data, dict) and "nanosecond heartbeat" in str(data)
+        
+        return False
+    except Exception as e:
+        print(f"Chroma server heartbeat check failed: {e}")
+        return False
+
+def prompt_user_start_chroma_server(host: str, port: int, data_dir: str) -> bool:
+    """
+    Prompt user to start a Chroma server if none is found.
+    
+    Args:
+        host: Chroma server host
+        port: Chroma server port
+        data_dir: Data directory for Chroma storage
+        
+    Returns:
+        True if user wants to start server, False otherwise
+    """
+    print(f"\n❌ No Chroma server found at {host}:{port}")
+    print(f"📁 Data will be stored in: {data_dir}")
+    print("\nWould you like to start a Chroma server? (Y/N): ", end="", flush=True)
+    
+    try:
+        response = input().strip().upper()
+        return response in ['Y', 'YES']
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user.")
+        return False
+    except Exception as e:
+        print(f"\nError reading user input: {e}")
+        return False
+
+def start_chroma_server(host: str, port: int, data_dir: str) -> bool:
+    """
+    Start a Chroma server in the background.
+    
+    Args:
+        host: Chroma server host
+        port: Chroma server port
+        data_dir: Data directory for Chroma storage
+        
+    Returns:
+        True if server started successfully, False otherwise
+    """
+    try:
+        # Ensure data directory exists
+        os.makedirs(data_dir, exist_ok=True)
+        
+        # Start Chroma server using the chromadb command
+        print(f"🚀 Starting Chroma server at {host}:{port}...")
+        print(f"📁 Using data directory: {data_dir}")
+        
+        # Use subprocess to start the server in background
+        cmd = [
+            sys.executable, "-m", "chromadb.cli.cli", 
+            "run", "--host", host, "--port", str(port), 
+            "--path", data_dir
+        ]
+        
+        # Start the process in background
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Wait a few seconds for server to start
+        print("⏳ Waiting for server to start...")
+        time.sleep(3)
+        
+        # Check if server is now responsive
+        for attempt in range(10):  # Try for 10 seconds
+            if check_chroma_server_heartbeat(host, port):
+                print(f"✅ Chroma server started successfully at {host}:{port}")
+                return True
+            time.sleep(1)
+        
+        # If we get here, server didn't start properly
+        print("❌ Failed to start Chroma server or server not responsive")
+        
+        # Try to terminate the process if it's still running
+        if process.poll() is None:
+            process.terminate()
+            
+        return False
+        
+    except Exception as e:
+        print(f"❌ Error starting Chroma server: {e}")
+        return False
+
+def get_chroma_client() -> ClientAPI:
+    """
+    Get a Chroma client with server management and collection initialization.
     
     Returns:
-        Supabase client instance
+        Chroma client instance
+        
+    Raises:
+        RuntimeError: If server is not available and user chooses not to start one
+        ValueError: If required environment variables are missing
     """
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_KEY")
+    host = os.getenv("CHROMA_HOST", "127.0.0.1")
+    port = int(os.getenv("CHROMA_PORT", "9000"))
     
-    if not url or not key:
-        raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in environment variables")
+    if not host or not port:
+        raise ValueError("CHROMA_HOST and CHROMA_PORT must be set in environment variables")
     
-    return create_client(url, key)
+    # Check if server is already running
+    if not check_chroma_server_heartbeat(host, port):
+        # Determine data directory (project root + /data)
+        project_root = os.path.abspath(".")
+        data_dir = os.path.join(project_root, "data")
+        
+        # Ask user if they want to start a server
+        if prompt_user_start_chroma_server(host, port, data_dir):
+            if not start_chroma_server(host, port, data_dir):
+                raise RuntimeError(f"Failed to start Chroma server at {host}:{port}")
+        else:
+            print("❌ Chroma server is required for operation. Shutting down.")
+            sys.exit(1)
+    else:
+        print(f"✅ Connected to existing Chroma server at {host}:{port}")
+    
+    # Create Chroma client
+    client = chromadb.HttpClient(
+        host=host,
+        port=port,
+        settings=Settings(
+            allow_reset=True,
+            anonymized_telemetry=False
+        )
+    )
+
+    # Ensure required collections exist
+    ensure_collections_exist(client)
+    
+    return client
+
+def prompt_user_create_collections(missing_collections: List[str]) -> bool:
+    """
+    Prompt user to create missing collections.
+    
+    Args:
+        missing_collections: List of missing collection names
+        
+    Returns:
+        True if user wants to create collections, False otherwise
+    """
+    print(f"\n❌ Missing required collections: {', '.join(missing_collections)}")
+    print("These collections are required for the system to function properly.")
+    print("\nWould you like to create the missing collections? (Y/N): ", end="", flush=True)
+    
+    try:
+        response = input().strip().upper()
+        return response in ['Y', 'YES']
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user.")
+        return False
+    except Exception as e:
+        print(f"\nError reading user input: {e}")
+        return False
+
+def ensure_collections_exist(client: ClientAPI) -> None:
+    """
+    Ensure all required collections exist, prompting user to create if missing.
+    
+    Args:
+        client: Chroma client instance
+        
+    Raises:
+        RuntimeError: If collections don't exist and user chooses not to create them
+    """
+    # Get existing collections
+    existing_collections = {col.name for col in client.list_collections()}
+    required_collections = set(CHROMA_COLLECTIONS.keys())
+    missing_collections = required_collections - existing_collections
+    
+    if missing_collections:
+        if prompt_user_create_collections(list(missing_collections)):
+            print("🔨 Creating missing collections...")
+            create_collections(client, list(missing_collections))
+            print("✅ All collections created successfully")
+        else:
+            print("❌ Required collections are missing and user declined to create them.")
+            print("The system cannot function without these collections. Shutting down.")
+            sys.exit(1)
+    else:
+        print("✅ All required collections exist")
+
+def create_collections(client: ClientAPI, collection_names: List[str]) -> None:
+    """
+    Create the specified Chroma collections with proper schema.
+    
+    Args:
+        client: Chroma client instance
+        collection_names: List of collection names to create
+    """
+    for name in collection_names:
+        if name not in CHROMA_COLLECTIONS:
+            raise ValueError(f"Unknown collection: {name}")
+        
+        config = CHROMA_COLLECTIONS[name]
+        
+        try:
+            if config["has_embeddings"]:
+                # Collections with embeddings (crawled_pages, code_examples)
+                collection = client.create_collection(
+                    name=name,
+                    metadata={"description": f"Collection for {name} with embeddings"}
+                )
+                print(f"✅ Created collection '{name}' with embeddings")
+            else:
+                # Collections without embeddings (sources)
+                collection = client.create_collection(
+                    name=name,
+                    metadata={"description": f"Collection for {name} metadata only"}
+                )
+                print(f"✅ Created collection '{name}' (metadata only)")
+                
+        except Exception as e:
+            print(f"❌ Error creating collection '{name}': {e}")
+            raise
 
 def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
     """
@@ -92,7 +371,7 @@ def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
         try:
             response = _with_llm_limits(
                 openai.embeddings.create,
-                model="text-embedding-3-small",  # Hardcoding embedding model for now
+                model="text-embedding-3-small",
                 input=texts
             )
             return [item.embedding for item in response.data]
@@ -194,6 +473,116 @@ Please give a short succinct context to situate this chunk within the overall do
         print(f"Error generating contextual embedding: {e}. Using original chunk instead.")
         return chunk, False
 
+def generate_code_example_summary(code: str, context_before: str, context_after: str) -> str:
+    """
+    Generate a summary for a code example using its surrounding context.
+    
+    Args:
+        code: The code example
+        context_before: Context before the code
+        context_after: Context after the code
+        
+    Returns:
+        A summary of what the code example demonstrates
+    """
+    model_choice = os.getenv("MODEL_CHOICE")
+    
+    # Create the prompt
+    prompt = f"""<context_before>
+{context_before[-500:] if len(context_before) > 500 else context_before}
+</context_before>
+
+<code_example>
+{code[:1500] if len(code) > 1500 else code}
+</code_example>
+
+<context_after>
+{context_after[:500] if len(context_after) > 500 else context_after}
+</context_after>
+
+Based on the code example and its surrounding context, provide a concise summary (2-3 sentences) that describes what this code example demonstrates and its purpose. Focus on the practical application and key concepts illustrated.
+"""
+    
+    try:
+        response = _with_llm_limits(
+            openai.chat.completions.create,
+            model=model_choice,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that provides concise code example summaries."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=100
+        )
+        
+        return response.choices[0].message.content.strip()
+    
+    except Exception as e:
+        print(f"Error generating code example summary: {e}")
+        return "Code example for demonstration purposes."
+
+def extract_source_summary(source_id: str, content: str, max_length: int = 500) -> str:
+    """
+    Extract a summary for a source from its content using an LLM.
+    
+    This function uses the OpenAI API to generate a concise summary of the source content.
+    
+    Args:
+        source_id: The source ID (domain)
+        content: The content to extract a summary from
+        max_length: Maximum length of the summary
+        
+    Returns:
+        A summary string
+    """
+    # Default summary if we can't extract anything meaningful
+    default_summary = f"Content from {source_id}"
+    
+    if not content or len(content.strip()) == 0:
+        return default_summary
+    
+    # Get the model choice from environment variables
+    model_choice = os.getenv("MODEL_CHOICE")
+    
+    # Limit content length to avoid token limits
+    truncated_content = content[:25000] if len(content) > 25000 else content
+    
+    # Create the prompt for generating the summary
+    prompt = f"""<source_content>
+{truncated_content}
+</source_content>
+
+The above content is from the documentation for '{source_id}'. Please provide a concise summary (3-5 sentences) that describes what this library/tool/framework is about. The summary should help understand what the library/tool/framework accomplishes and the purpose.
+"""
+    
+    try:
+        # Call the OpenAI API to generate the summary
+        response = _with_llm_limits(
+            openai.chat.completions.create,
+            model=model_choice,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that provides concise library/tool/framework summaries."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=150
+        )
+        
+        # Extract the generated summary
+        summary = response.choices[0].message.content.strip()
+        
+        # Ensure the summary is not too long
+        if len(summary) > max_length:
+            summary = summary[:max_length] + "..."
+            
+        return summary
+    
+    except Exception as e:
+        print(f"Error generating summary with LLM for {source_id}: {e}. Using default summary.")
+        return default_summary
+
+# Document storage and retrieval functions for Chroma
+
 def process_chunk_with_context(args):
     """
     Process a single chunk with contextual embedding.
@@ -210,21 +599,21 @@ def process_chunk_with_context(args):
     url, content, full_document = args
     return generate_contextual_embedding(full_document, content)
 
-def add_documents_to_supabase(
-    client: Client, 
-    urls: List[str], 
+def add_documents_to_chroma(
+    client: ClientAPI,
+    urls: List[str],
     chunk_numbers: List[int],
-    contents: List[str], 
+    contents: List[str],
     metadatas: List[Dict[str, Any]],
     url_to_full_document: Dict[str, str],
     batch_size: int = 20
 ) -> None:
     """
-    Add documents to the Supabase crawled_pages table in batches.
+    Add documents to the Chroma crawled_pages collection in batches.
     Deletes existing records with the same URLs before inserting to prevent duplicates.
     
     Args:
-        client: Supabase client
+        client: Chroma client
         urls: List of URLs
         chunk_numbers: List of chunk numbers
         contents: List of document contents
@@ -232,25 +621,39 @@ def add_documents_to_supabase(
         url_to_full_document: Dictionary mapping URLs to their full document content
         batch_size: Size of each batch for insertion
     """
+    import concurrent.futures
+    from datetime import datetime
+    
+    # Get the crawled_pages collection
+    collection = client.get_collection("crawled_pages")
+    
     # Get unique URLs to delete existing records
     unique_urls = list(set(urls))
     
-    # Delete existing records for these URLs in a single operation
+    # Delete existing records for these URLs
     try:
         if unique_urls:
-            # Use the .in_() filter to delete all records with matching URLs
-            client.table("crawled_pages").delete().in_("url", unique_urls).execute()
+            # Query for existing documents with these URLs
+            for url in unique_urls:
+                try:
+                    # Get existing documents for this URL
+                    results = collection.get(
+                        where={"url": url}
+                    )
+                    
+                    # Delete the documents if they exist
+                    if results['ids']:
+                        collection.delete(ids=results['ids'])
+                        print(f"Deleted {len(results['ids'])} existing documents for URL: {url}")
+                        
+                except Exception as e:
+                    print(f"Error deleting records for URL {url}: {e}")
+                    # Continue with the next URL even if one fails
+                    
     except Exception as e:
-        print(f"Batch delete failed: {e}. Trying one-by-one deletion as fallback.")
-        # Fallback: delete records one by one
-        for url in unique_urls:
-            try:
-                client.table("crawled_pages").delete().eq("url", url).execute()
-            except Exception as inner_e:
-                print(f"Error deleting record for URL {url}: {inner_e}")
-                # Continue with the next URL even if one fails
+        print(f"Error during batch deletion: {e}")
     
-    # Check if MODEL_CHOICE is set for contextual embeddings
+    # Check if contextual embeddings are enabled
     use_contextual_embeddings = os.getenv("USE_CONTEXTUAL_EMBEDDINGS", "false") == "true"
     print(f"\n\nUse contextual embeddings: {use_contextual_embeddings}\n\n")
     
@@ -264,7 +667,7 @@ def add_documents_to_supabase(
         batch_contents = contents[i:batch_end]
         batch_metadatas = metadatas[i:batch_end]
         
-        # Apply contextual embedding to each chunk if MODEL_CHOICE is set
+        # Apply contextual embedding to each chunk if enabled
         if use_contextual_embeddings:
             # Prepare arguments for parallel processing
             process_args = []
@@ -277,7 +680,7 @@ def add_documents_to_supabase(
             contextual_contents = []
             with concurrent.futures.ThreadPoolExecutor(max_workers=LLM_MAX_CONCURRENCY) as executor:
                 # Submit all tasks and collect results
-                future_to_idx = {executor.submit(process_chunk_with_context, arg): idx 
+                future_to_idx = {executor.submit(process_chunk_with_context, arg): idx
                                 for idx, arg in enumerate(process_args)}
                 
                 # Process results as they complete
@@ -305,41 +708,52 @@ def add_documents_to_supabase(
         # Create embeddings for the entire batch at once
         batch_embeddings = create_embeddings_batch(contextual_contents)
         
-        batch_data = []
+        # Prepare batch data for Chroma
+        batch_ids = []
+        batch_documents = []
+        batch_embeddings_final = []
+        batch_metadatas_final = []
+        
         for j in range(len(contextual_contents)):
-            # Extract metadata fields
-            chunk_size = len(contextual_contents[j])
+            # Create unique ID combining URL and chunk number
+            doc_id = f"{extract_source_id(batch_urls[j])}_chunk_{batch_chunk_numbers[j]}_{hash(batch_urls[j]) % 10000}"
             
             # Extract source_id from URL
             source_id = extract_source_id(batch_urls[j])
             
-            # Prepare data for insertion
-            data = {
+            # Prepare metadata for Chroma (matching SQL schema)
+            metadata = {
                 "url": batch_urls[j],
                 "chunk_number": batch_chunk_numbers[j],
-                "content": contextual_contents[j],  # Store original content
-                "metadata": {
-                    "chunk_size": chunk_size,
-                    **batch_metadatas[j]
-                },
-                "source_id": source_id,  # Add source_id field
-                "embedding": batch_embeddings[j]  # Use embedding from contextual content
+                "content": batch_contents[j],  # Store original content in metadata
+                "metadata": batch_metadatas[j],  # Original JSON metadata
+                "source_id": source_id,
+                "created_at": datetime.utcnow().isoformat() + "Z"
             }
             
-            batch_data.append(data)
+            batch_ids.append(doc_id)
+            batch_documents.append(contextual_contents[j])  # Document text for embedding
+            batch_embeddings_final.append(batch_embeddings[j])
+            batch_metadatas_final.append(metadata)
         
-        # Insert batch into Supabase with retry logic
+        # Insert batch into Chroma with retry logic
         max_retries = 3
         retry_delay = 1.0  # Start with 1 second delay
         
         for retry in range(max_retries):
             try:
-                client.table("crawled_pages").insert(batch_data).execute()
+                collection.add(
+                    ids=batch_ids,
+                    documents=batch_documents,
+                    embeddings=batch_embeddings_final,
+                    metadatas=batch_metadatas_final
+                )
+                print(f"Successfully inserted batch {i//batch_size + 1} of {(len(contents) + batch_size - 1)//batch_size}")
                 # Success - break out of retry loop
                 break
             except Exception as e:
                 if retry < max_retries - 1:
-                    print(f"Error inserting batch into Supabase (attempt {retry + 1}/{max_retries}): {e}")
+                    print(f"Error inserting batch into Chroma (attempt {retry + 1}/{max_retries}): {e}")
                     print(f"Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
@@ -349,27 +763,32 @@ def add_documents_to_supabase(
                     # Optionally, try inserting records one by one as a last resort
                     print("Attempting to insert records individually...")
                     successful_inserts = 0
-                    for record in batch_data:
+                    for k in range(len(batch_ids)):
                         try:
-                            client.table("crawled_pages").insert(record).execute()
+                            collection.add(
+                                ids=[batch_ids[k]],
+                                documents=[batch_documents[k]],
+                                embeddings=[batch_embeddings_final[k]],
+                                metadatas=[batch_metadatas_final[k]]
+                            )
                             successful_inserts += 1
                         except Exception as individual_error:
-                            print(f"Failed to insert individual record for URL {record['url']}: {individual_error}")
+                            print(f"Failed to insert individual record for URL {batch_urls[k]}: {individual_error}")
                     
                     if successful_inserts > 0:
-                        print(f"Successfully inserted {successful_inserts}/{len(batch_data)} records individually")
+                        print(f"Successfully inserted {successful_inserts}/{len(batch_ids)} records individually")
 
 def search_documents(
-    client: Client, 
-    query: str, 
-    match_count: int = 10, 
+    client: ClientAPI,
+    query: str,
+    match_count: int = 10,
     filter_metadata: Optional[Dict[str, Any]] = None
 ) -> List[Dict[str, Any]]:
     """
-    Search for documents in Supabase using vector similarity.
+    Search for documents in Chroma using vector similarity.
     
     Args:
-        client: Supabase client
+        client: Chroma client
         query: Query text
         match_count: Maximum number of results to return
         filter_metadata: Optional metadata filter
@@ -377,28 +796,50 @@ def search_documents(
     Returns:
         List of matching documents
     """
-    # Create embedding for the query
-    query_embedding = create_embedding(query)
-    
-    # Execute the search using the match_crawled_pages function
     try:
-        # Only include filter parameter if filter_metadata is provided and not empty
-        params = {
-            'query_embedding': query_embedding,
-            'match_count': match_count
-        }
+        # Get the crawled_pages collection
+        collection = client.get_collection("crawled_pages")
         
-        # Only add the filter if it's actually provided and not empty
+        # Create embedding for the query
+        query_embedding = create_embedding(query)
+        
+        # Prepare where clause for filtering
+        where_clause = None
         if filter_metadata:
-            params['filter'] = filter_metadata  # Pass the dictionary directly, not JSON-encoded
+            where_clause = filter_metadata
         
-        result = client.rpc('match_crawled_pages', params).execute()
+        # Execute the search
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=match_count,
+            where=where_clause
+        )
         
-        return result.data
+        formatted_results = []
+        if results['ids'] and len(results['ids']) > 0:
+            for i, doc_id in enumerate(results['ids'][0]):
+                # Calculate similarity score (Chroma returns distances, we want similarity)
+                distance = results['distances'][0][i] if results['distances'] else 0
+                similarity = 1 - distance  # Convert distance to similarity
+                
+                metadata = results['metadatas'][0][i]
+                
+                formatted_result = {
+                    "id": doc_id,
+                    "url": metadata.get("url"),
+                    "chunk_number": metadata.get("chunk_number"),
+                    "content": metadata.get("content"),
+                    "metadata": metadata.get("metadata", {}),
+                    "source_id": metadata.get("source_id"),
+                    "similarity": similarity
+                }
+                formatted_results.append(formatted_result)
+        
+        return formatted_results
+        
     except Exception as e:
         print(f"Error searching documents: {e}")
         return []
-
 
 def extract_code_blocks(markdown_content: str, min_length: int = 1000) -> List[Dict[str, Any]]:
     """
@@ -481,58 +922,8 @@ def extract_code_blocks(markdown_content: str, min_length: int = 1000) -> List[D
     
     return code_blocks
 
-
-def generate_code_example_summary(code: str, context_before: str, context_after: str) -> str:
-    """
-    Generate a summary for a code example using its surrounding context.
-    
-    Args:
-        code: The code example
-        context_before: Context before the code
-        context_after: Context after the code
-        
-    Returns:
-        A summary of what the code example demonstrates
-    """
-    model_choice = os.getenv("MODEL_CHOICE")
-    
-    # Create the prompt
-    prompt = f"""<context_before>
-{context_before[-500:] if len(context_before) > 500 else context_before}
-</context_before>
-
-<code_example>
-{code[:1500] if len(code) > 1500 else code}
-</code_example>
-
-<context_after>
-{context_after[:500] if len(context_after) > 500 else context_after}
-</context_after>
-
-Based on the code example and its surrounding context, provide a concise summary (2-3 sentences) that describes what this code example demonstrates and its purpose. Focus on the practical application and key concepts illustrated.
-"""
-    
-    try:
-        response = _with_llm_limits(
-            openai.chat.completions.create,
-            model=model_choice,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that provides concise code example summaries."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=100
-        )
-        
-        return response.choices[0].message.content.strip()
-    
-    except Exception as e:
-        print(f"Error generating code example summary: {e}")
-        return "Code example for demonstration purposes."
-
-
-def add_code_examples_to_supabase(
-    client: Client,
+def add_code_examples_to_chroma(
+    client: ClientAPI,
     urls: List[str],
     chunk_numbers: List[int],
     code_examples: List[str],
@@ -541,10 +932,10 @@ def add_code_examples_to_supabase(
     batch_size: int = 20
 ):
     """
-    Add code examples to the Supabase code_examples table in batches.
+    Add code examples to the Chroma code_examples collection in batches.
     
     Args:
-        client: Supabase client
+        client: Chroma client
         urls: List of URLs
         chunk_numbers: List of chunk numbers
         code_examples: List of code example contents
@@ -552,14 +943,28 @@ def add_code_examples_to_supabase(
         metadatas: List of metadata dictionaries
         batch_size: Size of each batch for insertion
     """
+    from datetime import datetime
+    
     if not urls:
         return
+    
+    # Get the code_examples collection
+    collection = client.get_collection("code_examples")
         
     # Delete existing records for these URLs
     unique_urls = list(set(urls))
     for url in unique_urls:
         try:
-            client.table('code_examples').delete().eq('url', url).execute()
+            # Get existing documents for this URL
+            results = collection.get(
+                where={"url": url}
+            )
+            
+            # Delete the documents if they exist
+            if results['ids']:
+                collection.delete(ids=results['ids'])
+                print(f"Deleted {len(results['ids'])} existing code examples for URL: {url}")
+                
         except Exception as e:
             print(f"Error deleting existing code examples for {url}: {e}")
     
@@ -588,36 +993,54 @@ def add_code_examples_to_supabase(
                 single_embedding = create_embedding(batch_texts[len(valid_embeddings)])
                 valid_embeddings.append(single_embedding)
         
-        # Prepare batch data
-        batch_data = []
+        # Prepare batch data for Chroma
+        batch_ids = []
+        batch_documents = []
+        batch_embeddings_final = []
+        batch_metadatas_final = []
+        
         for j, embedding in enumerate(valid_embeddings):
             idx = i + j
+            
+            # Create unique ID combining URL and chunk number
+            doc_id = f"{extract_source_id(urls[idx])}_code_{chunk_numbers[idx]}_{hash(urls[idx]) % 10000}"
             
             # Extract source_id from URL
             source_id = extract_source_id(urls[idx])
             
-            batch_data.append({
-                'url': urls[idx],
-                'chunk_number': chunk_numbers[idx],
-                'content': code_examples[idx],
-                'summary': summaries[idx],
-                'metadata': metadatas[idx],  # Store as JSON object, not string
-                'source_id': source_id,
-                'embedding': embedding
-            })
+            # Prepare metadata for Chroma (matching SQL schema)
+            metadata = {
+                "url": urls[idx],
+                "chunk_number": chunk_numbers[idx],
+                "content": code_examples[idx],  # Code content
+                "summary": summaries[idx],  # Code description
+                "metadata": metadatas[idx],  # Original JSON metadata
+                "source_id": source_id,
+                "created_at": datetime.utcnow().isoformat() + "Z"
+            }
+            
+            batch_ids.append(doc_id)
+            batch_documents.append(batch_texts[j])  # Combined text for embedding
+            batch_embeddings_final.append(embedding)
+            batch_metadatas_final.append(metadata)
         
-        # Insert batch into Supabase with retry logic
+        # Insert batch into Chroma with retry logic
         max_retries = 3
         retry_delay = 1.0  # Start with 1 second delay
         
         for retry in range(max_retries):
             try:
-                client.table('code_examples').insert(batch_data).execute()
+                collection.add(
+                    ids=batch_ids,
+                    documents=batch_documents,
+                    embeddings=batch_embeddings_final,
+                    metadatas=batch_metadatas_final
+                )
                 # Success - break out of retry loop
                 break
             except Exception as e:
                 if retry < max_retries - 1:
-                    print(f"Error inserting batch into Supabase (attempt {retry + 1}/{max_retries}): {e}")
+                    print(f"Error inserting batch into Chroma (attempt {retry + 1}/{max_retries}): {e}")
                     print(f"Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
@@ -627,124 +1050,35 @@ def add_code_examples_to_supabase(
                     # Optionally, try inserting records one by one as a last resort
                     print("Attempting to insert records individually...")
                     successful_inserts = 0
-                    for record in batch_data:
+                    for k in range(len(batch_ids)):
                         try:
-                            client.table('code_examples').insert(record).execute()
+                            collection.add(
+                                ids=[batch_ids[k]],
+                                documents=[batch_documents[k]],
+                                embeddings=[batch_embeddings_final[k]],
+                                metadatas=[batch_metadatas_final[k]]
+                            )
                             successful_inserts += 1
                         except Exception as individual_error:
-                            print(f"Failed to insert individual record for URL {record['url']}: {individual_error}")
+                            print(f"Failed to insert individual record for URL {urls[i + k]}: {individual_error}")
                     
                     if successful_inserts > 0:
-                        print(f"Successfully inserted {successful_inserts}/{len(batch_data)} records individually")
+                        print(f"Successfully inserted {successful_inserts}/{len(batch_ids)} records individually")
+        
         print(f"Inserted batch {i//batch_size + 1} of {(total_items + batch_size - 1)//batch_size} code examples")
 
-
-def update_source_info(client: Client, source_id: str, summary: str, word_count: int):
-    """
-    Update or insert source information in the sources table.
-    
-    Args:
-        client: Supabase client
-        source_id: The source ID (domain)
-        summary: Summary of the source
-        word_count: Total word count for the source
-    """
-    try:
-        # Try to update existing source
-        result = client.table('sources').update({
-            'summary': summary,
-            'total_word_count': word_count,
-            'updated_at': 'now()'
-        }).eq('source_id', source_id).execute()
-        
-        # If no rows were updated, insert new source
-        if not result.data:
-            client.table('sources').insert({
-                'source_id': source_id,
-                'summary': summary,
-                'total_word_count': word_count
-            }).execute()
-            print(f"Created new source: {source_id}")
-        else:
-            print(f"Updated source: {source_id}")
-            
-    except Exception as e:
-        print(f"Error updating source {source_id}: {e}")
-
-
-def extract_source_summary(source_id: str, content: str, max_length: int = 500) -> str:
-    """
-    Extract a summary for a source from its content using an LLM.
-    
-    This function uses the OpenAI API to generate a concise summary of the source content.
-    
-    Args:
-        source_id: The source ID (domain)
-        content: The content to extract a summary from
-        max_length: Maximum length of the summary
-        
-    Returns:
-        A summary string
-    """
-    # Default summary if we can't extract anything meaningful
-    default_summary = f"Content from {source_id}"
-    
-    if not content or len(content.strip()) == 0:
-        return default_summary
-    
-    # Get the model choice from environment variables
-    model_choice = os.getenv("MODEL_CHOICE")
-    
-    # Limit content length to avoid token limits
-    truncated_content = content[:25000] if len(content) > 25000 else content
-    
-    # Create the prompt for generating the summary
-    prompt = f"""<source_content>
-{truncated_content}
-</source_content>
-
-The above content is from the documentation for '{source_id}'. Please provide a concise summary (3-5 sentences) that describes what this library/tool/framework is about. The summary should help understand what the library/tool/framework accomplishes and the purpose.
-"""
-    
-    try:
-        # Call the OpenAI API to generate the summary
-        response = _with_llm_limits(
-            openai.chat.completions.create,
-            model=model_choice,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that provides concise library/tool/framework summaries."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=150
-        )
-        
-        # Extract the generated summary
-        summary = response.choices[0].message.content.strip()
-        
-        # Ensure the summary is not too long
-        if len(summary) > max_length:
-            summary = summary[:max_length] + "..."
-            
-        return summary
-    
-    except Exception as e:
-        print(f"Error generating summary with LLM for {source_id}: {e}. Using default summary.")
-        return default_summary
-
-
 def search_code_examples(
-    client: Client, 
-    query: str, 
-    match_count: int = 10, 
+    client: ClientAPI,
+    query: str,
+    match_count: int = 10,
     filter_metadata: Optional[Dict[str, Any]] = None,
     source_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
-    Search for code examples in Supabase using vector similarity.
+    Search for code examples in Chroma using vector similarity.
     
     Args:
-        client: Supabase client
+        client: Chroma client
         query: Query text
         match_count: Maximum number of results to return
         filter_metadata: Optional metadata filter
@@ -753,32 +1087,150 @@ def search_code_examples(
     Returns:
         List of matching code examples
     """
-    # Create a more descriptive query for better embedding match
-    # Since code examples are embedded with their summaries, we should make the query more descriptive
-    enhanced_query = f"Code example for {query}\n\nSummary: Example code showing {query}"
-    
-    # Create embedding for the enhanced query
-    query_embedding = create_embedding(enhanced_query)
-    
-    # Execute the search using the match_code_examples function
     try:
-        # Only include filter parameter if filter_metadata is provided and not empty
-        params = {
-            'query_embedding': query_embedding,
-            'match_count': match_count
-        }
+        # Get the code_examples collection
+        collection = client.get_collection("code_examples")
         
-        # Only add the filter if it's actually provided and not empty
+        # Create a more descriptive query for better embedding match
+        # Since code examples are embedded with their summaries, we should make the query more descriptive
+        enhanced_query = f"Code example for {query}\n\nSummary: Example code showing {query}"
+        
+        # Create embedding for the enhanced query
+        query_embedding = create_embedding(enhanced_query)
+        
+        # Prepare where clause for filtering
+        where_clause = {}
         if filter_metadata:
-            params['filter'] = filter_metadata
-            
-        # Add source filter if provided
+            where_clause.update(filter_metadata)
         if source_id:
-            params['source_filter'] = source_id
+            where_clause["source_id"] = source_id
         
-        result = client.rpc('match_code_examples', params).execute()
+        # Use where_clause only if it has content
+        where_param = where_clause if where_clause else None
         
-        return result.data
+        # Execute the search
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=match_count,
+            where=where_param
+        )
+        
+        formatted_results = []
+        if results['ids'] and len(results['ids']) > 0:
+            for i, doc_id in enumerate(results['ids'][0]):
+                # Calculate similarity score (Chroma returns distances, we want similarity)
+                distance = results['distances'][0][i] if results['distances'] else 0
+                similarity = 1 - distance  # Convert distance to similarity
+                
+                metadata = results['metadatas'][0][i]
+                
+                formatted_result = {
+                    "id": doc_id,
+                    "url": metadata.get("url"),
+                    "chunk_number": metadata.get("chunk_number"),
+                    "content": metadata.get("content"),
+                    "summary": metadata.get("summary"),
+                    "metadata": metadata.get("metadata", {}),
+                    "source_id": metadata.get("source_id"),
+                    "similarity": similarity
+                }
+                formatted_results.append(formatted_result)
+        
+        return formatted_results
+        
     except Exception as e:
         print(f"Error searching code examples: {e}")
+        return []
+
+def update_source_info(client: ClientAPI, source_id: str, summary: str, word_count: int):
+    """
+    Update or insert source information in the sources collection.
+    
+    Args:
+        client: Chroma client
+        source_id: The source ID (domain)
+        summary: Summary of the source
+        word_count: Total word count for the source
+    """
+    from datetime import datetime
+    
+    try:
+        # Get the sources collection
+        collection = client.get_collection("sources")
+        
+        # Check if source already exists
+        try:
+            existing = collection.get(
+                where={"source_id": source_id}
+            )
+            
+            if existing['ids']:
+                # Update existing source - delete and re-add
+                collection.delete(ids=existing['ids'])
+                print(f"Updated existing source: {source_id}")
+            else:
+                print(f"Created new source: {source_id}")
+                
+        except Exception as e:
+            print(f"Error checking existing source: {e}")
+            print(f"Creating new source: {source_id}")
+        
+        # Create unique ID for the source
+        doc_id = f"source_{hash(source_id) % 100000}"
+        
+        # Prepare metadata
+        metadata = {
+            "source_id": source_id,
+            "summary": summary,
+            "total_word_count": word_count,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "updated_at": datetime.utcnow().isoformat() + "Z"
+        }
+        
+        # Add to collection (sources collection doesn't use embeddings)
+        collection.add(
+            ids=[doc_id],
+            documents=[f"Source: {source_id} - {summary}"],  # Document text for potential future search
+            metadatas=[metadata]
+        )
+            
+    except Exception as e:
+        print(f"Error updating source {source_id}: {e}")
+
+def get_available_sources(client: ClientAPI) -> List[Dict[str, Any]]:
+    """
+    Get all available sources from the sources collection.
+    
+    Args:
+        client: Chroma client
+        
+    Returns:
+        List of source information dictionaries
+    """
+    try:
+        # Get the sources collection
+        collection = client.get_collection("sources")
+        
+        # Get all sources
+        results = collection.get()
+        
+        # Format the sources with their details
+        sources = []
+        if results['metadatas']:
+            for metadata in results['metadatas']:
+                sources.append({
+                    "source_id": metadata.get("source_id"),
+                    "summary": metadata.get("summary"),
+                    "total_words": metadata.get("total_word_count"),
+                    "created_at": metadata.get("created_at"),
+                    "updated_at": metadata.get("updated_at")
+                })
+        
+        # Sort by source_id for consistency
+        sources.sort(key=lambda x: x.get("source_id", ""))
+        
+        return sources
+        
+    except Exception as e:
+        print(f"Error getting available sources: {e}")
         return []
