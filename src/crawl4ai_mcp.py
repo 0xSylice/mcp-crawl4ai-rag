@@ -1938,6 +1938,15 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     def normalize_url(url):
         return urldefrag(url)[0]
 
+    def get_base_domain(url):
+        """Extract the base domain from a URL (protocol + domain)"""
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    # Store the base domain from the first start URL for reference
+    base_domain = get_base_domain(start_urls[0]) if start_urls else ""
+
     current_urls = set([normalize_url(u) for u in start_urls])
     results_all = []
 
@@ -1956,27 +1965,23 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
             if result.success and result.markdown:
                 results_all.append({'url': result.url, 'markdown': result.markdown})
                 for link in result.links.get("internal", []):
-                    # The crawler is not handling internal links correctly, so let's fix it here as a work around
-                    # Check if norm_url is substring of internal link href
-                    if norm_url in link["href"]:
-                        # Normalise the link first
-                        norm_link = normalize_url(link["href"])
-                        # Cut norm_url from internal to get relative path
-                        relative_path = norm_link.replace(norm_url, "")
-                        # prune leading / from relative path to avoid empty string later
-                        if relative_path.startswith("/"):
-                            relative_path = relative_path[1:]
-                        # if rel path not empty 
-                        if relative_path:
-                            # Trim page/file ref from norm_url (everything after last '/')
-                            base_url = norm_url.rsplit('/', 1)[0]
-                            # Concat proper relative path to trimmed norm_url
-                            corrected_url = f"{base_url}/{relative_path}" 
-                            # now this is sorted, we will stick with the established var names for consitency
-                            next_url = corrected_url 
-                            if next_url not in visited:
-                                next_level_urls.add(next_url)
-
+                    link_href = link["href"]
+                    
+                    # Handle different types of internal links
+                    if link_href.startswith('http'):
+                        # Absolute URL - use as is if it's on the same domain
+                        next_url = normalize_url(link_href)
+                    elif link_href.startswith('/'):
+                        # Root-relative URL - prepend base domain
+                        next_url = normalize_url(f"{base_domain}{link_href}")
+                    else:
+                        # Relative URL - resolve against current URL
+                        from urllib.parse import urljoin
+                        next_url = normalize_url(urljoin(norm_url, link_href))
+                    
+                    # Only add if it's on the same domain and not already visited
+                    if next_url.startswith(base_domain) and next_url not in visited:
+                        next_level_urls.add(next_url)
 
         current_urls = next_level_urls
 
