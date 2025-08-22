@@ -8,3 +8,4 @@ repos
 test_script_hallucination*
 data/
 *_original.py
+*_legacy.py
