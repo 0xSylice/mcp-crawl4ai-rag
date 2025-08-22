@@ -145,7 +145,7 @@ def prompt_user_start_chroma_server(host: str, port: int, data_dir: str) -> bool
     Returns:
         True if user wants to start server, False otherwise
     """
-    print(f"\n❌ No Chroma server found at {host}:{port}")
+    print(f"\n⚠ No Chroma server found at {host}:{port}")
     print(f"📁 Data will be stored in: {data_dir}")
     print("\nWould you like to start a Chroma server? (Y/N): ", end="", flush=True)
     
@@ -206,7 +206,7 @@ def start_chroma_server(host: str, port: int, data_dir: str) -> bool:
             time.sleep(1)
         
         # If we get here, server didn't start properly
-        print("❌ Failed to start Chroma server or server not responsive")
+        print("⚠ Failed to start Chroma server or server not responsive")
         
         # Try to terminate the process if it's still running
         if process.poll() is None:
@@ -215,8 +215,166 @@ def start_chroma_server(host: str, port: int, data_dir: str) -> bool:
         return False
         
     except Exception as e:
-        print(f"❌ Error starting Chroma server: {e}")
+        print(f"⚠ Error starting Chroma server: {e}")
         return False
+
+def validate_collection_embedding_dimension(client: ClientAPI, collection_name: str) -> bool:
+    """
+    Validate that a collection can accept our embedding dimensions.
+    
+    Args:
+        client: Chroma client instance
+        collection_name: Name of the collection to validate
+        
+    Returns:
+        True if dimensions are compatible, False otherwise
+    """
+    try:
+        collection = client.get_collection(collection_name)
+        
+        # Test with a small embedding to see what dimension is expected
+        test_embedding = [0.1] * 1536  # 1536-dimensional test embedding
+        test_id = "dimension_test_id"
+        
+        try:
+            # Attempt to add a test document
+            collection.add(
+                ids=[test_id],
+                documents=["test"],
+                embeddings=[test_embedding]
+            )
+            
+            # If successful, clean up the test document
+            collection.delete(ids=[test_id])
+            return True
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "dimension" in error_msg:
+                print(f"❌ Collection '{collection_name}' has embedding dimension mismatch: {e}")
+                return False
+            else:
+                # Some other error, re-raise it
+                raise e
+                
+    except Exception as e:
+        print(f"❌ Error validating collection '{collection_name}': {e}")
+        return False
+
+def prompt_user_create_collections(missing_collections: List[str]) -> bool:
+    """
+    Prompt user to create missing collections.
+    
+    Args:
+        missing_collections: List of missing collection names
+        
+    Returns:
+        True if user wants to create collections, False otherwise
+    """
+    print(f"\n⚠ Missing required collections: {', '.join(missing_collections)}")
+    print("These collections are required for the system to function properly.")
+    print("\nWould you like to create the missing collections? (Y/N): ", end="", flush=True)
+    
+    try:
+        response = input().strip().upper()
+        return response in ['Y', 'YES']
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user.")
+        return False
+    except Exception as e:
+        print(f"\nError reading user input: {e}")
+        return False
+
+def create_collections(client: ClientAPI, collection_names: List[str]) -> None:
+    """
+    Create the specified Chroma collections with proper schema and embedding dimensions.
+    
+    Args:
+        client: Chroma client instance
+        collection_names: List of collection names to create
+    """
+    for name in collection_names:
+        if name not in CHROMA_COLLECTIONS:
+            raise ValueError(f"Unknown collection: {name}")
+        
+        config = CHROMA_COLLECTIONS[name]
+        
+        try:
+            if config["has_embeddings"]:
+                # For collections with embeddings, we create the collection 
+                # without an embedding function and provide embeddings manually
+                # This ensures we control the exact dimension (1536)
+                collection = client.create_collection(
+                    name=name,
+                    metadata={
+                        "description": f"Collection for {name} with embeddings",
+                        "embedding_dimension": config.get("embedding_dimension", 1536),
+                        "embedding_function": config.get("embedding_function", "openai")
+                    }
+                    # Note: We don't specify embedding_function parameter because we provide embeddings manually
+                )
+                print(f"✅ Created collection '{name}' for {config.get('embedding_dimension', 1536)}D embeddings")
+            else:
+                # Collections without embeddings (sources)
+                collection = client.create_collection(
+                    name=name,
+                    metadata={"description": f"Collection for {name} metadata only"}
+                )
+                print(f"✅ Created collection '{name}' (metadata only)")
+                
+        except Exception as e:
+            print(f"❌ Error creating collection '{name}': {e}")
+            raise
+
+def ensure_collections_exist_with_validation(client: ClientAPI) -> None:
+    """
+    Enhanced version of ensure_collections_exist that validates embedding dimensions.
+    
+    Args:
+        client: Chroma client instance
+        
+    Raises:
+        RuntimeError: If collections have dimension mismatches
+    """
+    # Get existing collections
+    existing_collections = {col.name for col in client.list_collections()}
+    required_collections = set(CHROMA_COLLECTIONS.keys())
+    missing_collections = required_collections - existing_collections
+    
+    # Create missing collections
+    if missing_collections:
+        if prompt_user_create_collections(list(missing_collections)):
+            print("🔨 Creating missing collections with correct embedding dimensions...")
+            create_collections(client, list(missing_collections))
+            print("✅ All collections created successfully")
+        else:
+            print("❌ Required collections are missing and user declined to create them.")
+            print("The system cannot function without these collections. Shutting down.")
+            sys.exit(1)
+    
+    # Validate embedding dimensions for collections that should have embeddings
+    collections_with_embeddings = [name for name, config in CHROMA_COLLECTIONS.items() 
+                                 if config.get("has_embeddings", False)]
+    
+    dimension_issues = []
+    for collection_name in collections_with_embeddings:
+        if collection_name in existing_collections:
+            if not validate_collection_embedding_dimension(client, collection_name):
+                dimension_issues.append(collection_name)
+    
+    # Handle dimension mismatches
+    if dimension_issues:
+        print(f"\n❌ CRITICAL ERROR: Embedding dimension mismatches found in collections: {dimension_issues}")
+        print("Your existing collections expect 384-dimensional embeddings, but this system uses 1536-dimensional embeddings.")
+        print("\nTo fix this issue:")
+        print("1. Stop this application")
+        print("2. Delete your ChromaDB data directory completely")
+        print("3. Restart this application to create fresh collections with correct dimensions")
+        print("\nAlternatively, use ChromaDB admin tools to delete the problematic collections.")
+        print("❌ Cannot proceed with dimension mismatches.")
+        sys.exit(1)
+    else:
+        print("✅ All collections exist with correct embedding dimensions")
 
 def get_chroma_client() -> ClientAPI:
     """
@@ -261,95 +419,10 @@ def get_chroma_client() -> ClientAPI:
         )
     )
 
-    # Ensure required collections exist
-    ensure_collections_exist(client)
+    # Ensure required collections exist with proper validation
+    ensure_collections_exist_with_validation(client)
     
     return client
-
-def prompt_user_create_collections(missing_collections: List[str]) -> bool:
-    """
-    Prompt user to create missing collections.
-    
-    Args:
-        missing_collections: List of missing collection names
-        
-    Returns:
-        True if user wants to create collections, False otherwise
-    """
-    print(f"\n❌ Missing required collections: {', '.join(missing_collections)}")
-    print("These collections are required for the system to function properly.")
-    print("\nWould you like to create the missing collections? (Y/N): ", end="", flush=True)
-    
-    try:
-        response = input().strip().upper()
-        return response in ['Y', 'YES']
-    except KeyboardInterrupt:
-        print("\nOperation cancelled by user.")
-        return False
-    except Exception as e:
-        print(f"\nError reading user input: {e}")
-        return False
-
-def ensure_collections_exist(client: ClientAPI) -> None:
-    """
-    Ensure all required collections exist, prompting user to create if missing.
-    
-    Args:
-        client: Chroma client instance
-        
-    Raises:
-        RuntimeError: If collections don't exist and user chooses not to create them
-    """
-    # Get existing collections
-    existing_collections = {col.name for col in client.list_collections()}
-    required_collections = set(CHROMA_COLLECTIONS.keys())
-    missing_collections = required_collections - existing_collections
-    
-    if missing_collections:
-        if prompt_user_create_collections(list(missing_collections)):
-            print("🔨 Creating missing collections...")
-            create_collections(client, list(missing_collections))
-            print("✅ All collections created successfully")
-        else:
-            print("❌ Required collections are missing and user declined to create them.")
-            print("The system cannot function without these collections. Shutting down.")
-            sys.exit(1)
-    else:
-        print("✅ All required collections exist")
-
-def create_collections(client: ClientAPI, collection_names: List[str]) -> None:
-    """
-    Create the specified Chroma collections with proper schema.
-    
-    Args:
-        client: Chroma client instance
-        collection_names: List of collection names to create
-    """
-    for name in collection_names:
-        if name not in CHROMA_COLLECTIONS:
-            raise ValueError(f"Unknown collection: {name}")
-        
-        config = CHROMA_COLLECTIONS[name]
-        
-        try:
-            if config["has_embeddings"]:
-                # Collections with embeddings (crawled_pages, code_examples)
-                collection = client.create_collection(
-                    name=name,
-                    metadata={"description": f"Collection for {name} with embeddings"}
-                )
-                print(f"✅ Created collection '{name}' with embeddings")
-            else:
-                # Collections without embeddings (sources)
-                collection = client.create_collection(
-                    name=name,
-                    metadata={"description": f"Collection for {name} metadata only"}
-                )
-                print(f"✅ Created collection '{name}' (metadata only)")
-                
-        except Exception as e:
-            print(f"❌ Error creating collection '{name}': {e}")
-            raise
 
 def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
     """
@@ -374,7 +447,14 @@ def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
                 model="text-embedding-3-small",
                 input=texts
             )
-            return [item.embedding for item in response.data]
+            embeddings = [item.embedding for item in response.data]
+            
+            # Validate that all embeddings have the correct dimension
+            for i, embedding in enumerate(embeddings):
+                if len(embedding) != 1536:
+                    print(f"⚠ Warning: Expected 1536-dimensional embedding, got {len(embedding)} for text {i}")
+            
+            return embeddings
         except Exception as e:
             if retry < max_retries - 1:
                 print(f"Error creating batch embeddings (attempt {retry + 1}/{max_retries}): {e}")
@@ -395,7 +475,18 @@ def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
                             model="text-embedding-3-small",
                             input=[text]
                         )
-                        embeddings.append(individual_response.data[0].embedding)
+                        embedding = individual_response.data[0].embedding
+                        
+                        # Validate dimension
+                        if len(embedding) != 1536:
+                            print(f"⚠ Warning: Expected 1536-dimensional embedding, got {len(embedding)} for text {i}")
+                            # Pad or truncate to correct size
+                            if len(embedding) < 1536:
+                                embedding.extend([0.0] * (1536 - len(embedding)))
+                            else:
+                                embedding = embedding[:1536]
+                        
+                        embeddings.append(embedding)
                         successful_count += 1
                     except Exception as individual_error:
                         print(f"Failed to create embedding for text {i}: {individual_error}")
@@ -413,7 +504,7 @@ def create_embedding(text: str) -> List[float]:
         text: Text to create an embedding for
         
     Returns:
-        List of floats representing the embedding
+        List of floats representing the embedding (guaranteed to be 1536-dimensional)
     """
     try:
         embeddings = create_embeddings_batch([text])
@@ -708,6 +799,16 @@ def add_documents_to_chroma(
         # Create embeddings for the entire batch at once
         batch_embeddings = create_embeddings_batch(contextual_contents)
         
+        # Validate embedding dimensions
+        for j, embedding in enumerate(batch_embeddings):
+            if len(embedding) != 1536:
+                print(f"⚠ Warning: Embedding dimension mismatch for batch item {j}: expected 1536, got {len(embedding)}")
+                # Fix the dimension
+                if len(embedding) < 1536:
+                    embedding.extend([0.0] * (1536 - len(embedding)))
+                else:
+                    batch_embeddings[j] = embedding[:1536]
+        
         # Prepare batch data for Chroma
         batch_ids = []
         batch_documents = []
@@ -802,6 +903,15 @@ def search_documents(
         
         # Create embedding for the query
         query_embedding = create_embedding(query)
+        
+        # Validate query embedding dimension
+        if len(query_embedding) != 1536:
+            print(f"⚠ Warning: Query embedding dimension mismatch: expected 1536, got {len(query_embedding)}")
+            # Fix the dimension
+            if len(query_embedding) < 1536:
+                query_embedding.extend([0.0] * (1536 - len(query_embedding)))
+            else:
+                query_embedding = query_embedding[:1536]
         
         # Prepare where clause for filtering
         where_clause = None
@@ -982,9 +1092,18 @@ def add_code_examples_to_chroma(
         # Create embeddings for the batch
         embeddings = create_embeddings_batch(batch_texts)
         
-        # Check if embeddings are valid (not all zeros)
+        # Check if embeddings are valid (not all zeros) and have correct dimensions
         valid_embeddings = []
-        for embedding in embeddings:
+        for k, embedding in enumerate(embeddings):
+            # Validate dimension
+            if len(embedding) != 1536:
+                print(f"⚠ Warning: Code example embedding dimension mismatch for item {k}: expected 1536, got {len(embedding)}")
+                # Fix the dimension
+                if len(embedding) < 1536:
+                    embedding.extend([0.0] * (1536 - len(embedding)))
+                else:
+                    embedding = embedding[:1536]
+            
             if embedding and not all(v == 0.0 for v in embedding):
                 valid_embeddings.append(embedding)
             else:
@@ -1097,6 +1216,15 @@ def search_code_examples(
         
         # Create embedding for the enhanced query
         query_embedding = create_embedding(enhanced_query)
+        
+        # Validate query embedding dimension
+        if len(query_embedding) != 1536:
+            print(f"⚠ Warning: Query embedding dimension mismatch: expected 1536, got {len(query_embedding)}")
+            # Fix the dimension
+            if len(query_embedding) < 1536:
+                query_embedding.extend([0.0] * (1536 - len(query_embedding)))
+            else:
+                query_embedding = query_embedding[:1536]
         
         # Prepare where clause for filtering
         where_clause = {}

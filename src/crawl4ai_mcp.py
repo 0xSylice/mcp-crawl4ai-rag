@@ -16,6 +16,7 @@ from xml.etree import ElementTree
 from dotenv import load_dotenv
 from chromadb.api import ClientAPI
 from pathlib import Path
+from datetime import datetime
 import requests
 import asyncio
 import json
@@ -746,8 +747,11 @@ async def get_available_sources(ctx: Context) -> str:
         # Get the Chroma client from the context
         chroma_client = ctx.request_context.lifespan_context.chroma_client
         
+        # Import the function from utils to avoid naming conflicts
+        from utils import get_available_sources as get_sources_impl
+        
         # Get sources from Chroma collection
-        sources = get_available_sources(chroma_client)
+        sources = get_sources_impl(chroma_client)
         
         return json.dumps({
             "success": True,
@@ -916,6 +920,148 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
             "query": query,
             "error": str(e)
         }, indent=2)
+
+# DEBUGGING FUNCTIONS START
+@mcp.tool()
+async def debug_chroma_collections(ctx: Context, collection_name: str = "crawled_pages", limit: int = 5) -> str:
+    """
+    Debug Chroma collections to understand data storage and retrieval issues.
+    
+    Args:
+        ctx: The MCP server provided context
+        collection_name: Name of collection to debug ("crawled_pages" or "code_examples") 
+        limit: Number of sample documents to examine
+    
+    Returns:
+        JSON string with detailed debugging information
+    """
+    try:
+        chroma_client = ctx.request_context.lifespan_context.chroma_client
+        
+        debug_info = {
+            "collection_name": collection_name,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+        # Check if collection exists
+        try:
+            collection = chroma_client.get_collection(collection_name)
+            debug_info["collection_exists"] = True
+        except Exception as e:
+            debug_info["collection_exists"] = False
+            debug_info["error"] = f"Collection does not exist: {str(e)}"
+            return json.dumps(debug_info, indent=2)
+        
+        # Get basic collection stats
+        try:
+            total_count = collection.count()
+            debug_info["total_documents"] = total_count
+            
+            if total_count == 0:
+                debug_info["issue"] = "Collection exists but contains no documents"
+                return json.dumps(debug_info, indent=2)
+                
+        except Exception as e:
+            debug_info["count_error"] = str(e)
+        
+        # Get sample documents
+        try:
+            sample_results = collection.get(limit=limit)
+            debug_info["sample_documents"] = {
+                "count": len(sample_results['ids']) if sample_results['ids'] else 0,
+                "documents": []
+            }
+            
+            if sample_results['ids']:
+                for i, doc_id in enumerate(sample_results['ids'][:3]):
+                    doc_info = {
+                        "id": doc_id,
+                        "document_text_preview": sample_results['documents'][i][:200] + "..." if len(sample_results['documents'][i]) > 200 else sample_results['documents'][i],
+                        "document_length": len(sample_results['documents'][i]),
+                        "metadata_keys": list(sample_results['metadatas'][i].keys()),
+                        "source_id": sample_results['metadatas'][i].get('source_id'),
+                        "url": sample_results['metadatas'][i].get('url'),
+                        "chunk_number": sample_results['metadatas'][i].get('chunk_number'),
+                        "has_embedding": len(sample_results['embeddings'][i]) if sample_results.get('embeddings') and sample_results['embeddings'][i] else 0
+                    }
+                    debug_info["sample_documents"]["documents"].append(doc_info)
+        except Exception as e:
+            debug_info["sample_error"] = str(e)
+        
+        # Get unique source_ids
+        try:
+            all_results = collection.get()
+            if all_results['metadatas']:
+                source_ids = list(set(meta.get('source_id') for meta in all_results['metadatas'] if meta.get('source_id')))
+                debug_info["unique_sources"] = source_ids
+                
+                # Test filtering by mkdocs source specifically
+                mkdocs_source = "example-mkdocs-basic.readthedocs.io"
+                if mkdocs_source in source_ids:
+                    filtered_results = collection.get(where={"source_id": mkdocs_source}, limit=5)
+                    debug_info["mkdocs_filter_test"] = {
+                        "source_found": True,
+                        "documents_count": len(filtered_results['ids']) if filtered_results['ids'] else 0
+                    }
+                else:
+                    debug_info["mkdocs_filter_test"] = {
+                        "source_found": False,
+                        "available_sources": source_ids
+                    }
+        except Exception as e:
+            debug_info["source_filter_error"] = str(e)
+        
+        # Test embedding search with "mkdocs" query
+        try:
+            test_query = "mkdocs"
+            query_embedding = create_embedding(test_query)
+            
+            search_results = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=5
+            )
+            
+            debug_info["mkdocs_embedding_search"] = {
+                "test_query": test_query,
+                "query_embedding_length": len(query_embedding),
+                "results_count": len(search_results['ids'][0]) if search_results['ids'] else 0,
+                "sample_distances": search_results['distances'][0][:3] if search_results.get('distances') else [],
+                "sample_similarities": [1 - d for d in search_results['distances'][0][:3]] if search_results.get('distances') else []
+            }
+            
+            if search_results['ids'] and search_results['ids'][0]:
+                debug_info["mkdocs_embedding_search"]["found_results"] = []
+                for i, doc_id in enumerate(search_results['ids'][0][:3]):
+                    result_info = {
+                        "id": doc_id,
+                        "source_id": search_results['metadatas'][0][i].get('source_id'),
+                        "url": search_results['metadatas'][0][i].get('url'),
+                        "similarity": 1 - search_results['distances'][0][i],
+                        "content_preview": search_results['documents'][0][i][:200] + "..."
+                    }
+                    debug_info["mkdocs_embedding_search"]["found_results"].append(result_info)
+                    
+        except Exception as e:
+            debug_info["embedding_search_error"] = str(e)
+        
+        # Environment check
+        debug_info["environment"] = {
+            "use_contextual_embeddings": os.getenv("USE_CONTEXTUAL_EMBEDDINGS", "false"),
+            "use_hybrid_search": os.getenv("USE_HYBRID_SEARCH", "false"), 
+            "use_reranking": os.getenv("USE_RERANKING", "false"),
+            "openai_api_key_set": bool(os.getenv("OPENAI_API_KEY")),
+            "model_choice": os.getenv("MODEL_CHOICE")
+        }
+        
+        return json.dumps(debug_info, indent=2)
+        
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "collection_name": collection_name,
+            "error": f"Debug failed: {str(e)}"
+        }, indent=2)
+# DEBUGGING FUNCTIONS END
 
 @mcp.tool()
 async def search_code_examples(ctx: Context, query: str, source_id: str = None, match_count: int = 5) -> str:
