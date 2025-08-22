@@ -699,24 +699,10 @@ def add_documents_to_chroma(
     url_to_full_document: Dict[str, str],
     batch_size: int = 20
 ) -> None:
-    # DEBUG: Log what we're trying to store
-    print(f"\n=== DEBUG: add_documents_to_chroma called ===")
-    print(f"URLs count: {len(urls)}")
-    print(f"Contents count: {len(contents)}")
-    print(f"Sample URL: {urls[0] if urls else 'None'}")
-    print(f"Sample content length: {len(contents[0]) if contents else 0}")
-    print(f"Sample source_id would be: {extract_source_id(urls[0]) if urls else 'None'}")
-    print(f"Batch size: {batch_size}")
-
-    if not urls or not contents:
-        print("ERROR: No URLs or contents provided to add_documents_to_chroma")
-        return
-    # DEBUG: End
-
     """
     Add documents to the Chroma crawled_pages collection in batches.
     Deletes existing records with the same URLs before inserting to prevent duplicates.
-
+    
     Args:
         client: Chroma client
         urls: List of URLs
@@ -728,17 +714,17 @@ def add_documents_to_chroma(
     """
     import concurrent.futures
     from datetime import datetime
-
+    
+    if not urls or not contents:
+        print("ERROR: No URLs or contents provided to add_documents_to_chroma")
+        return
+    
     # Get the crawled_pages collection
     collection = client.get_collection("crawled_pages")
-
-    # DEBUG: Check collection before insertion
-    print(f"Collection count before insertion: {collection.count()}")
-    # DEBUG: End
-
+    
     # Get unique URLs to delete existing records
     unique_urls = list(set(urls))
-
+    
     # Delete existing records for these URLs
     try:
         if unique_urls:
@@ -746,41 +732,37 @@ def add_documents_to_chroma(
             for url in unique_urls:
                 try:
                     # Get existing documents for this URL
-                    results = collection.get(
-                        where={"url": url}
-                    )
-
+                    results = collection.get(where={"url": url})
+                    
                     # Delete the documents if they exist
                     if results['ids']:
                         collection.delete(ids=results['ids'])
                         print(f"Deleted {len(results['ids'])} existing documents for URL: {url}")
-
+                        
                 except Exception as e:
                     print(f"Error deleting records for URL {url}: {e}")
                     # Continue with the next URL even if one fails
-
+                    
     except Exception as e:
         print(f"Error during batch deletion: {e}")
-
+    
     # Check if contextual embeddings are enabled
     use_contextual_embeddings = os.getenv("USE_CONTEXTUAL_EMBEDDINGS", "false") == "true"
     print(f"\n\nUse contextual embeddings: {use_contextual_embeddings}\n\n")
-
+    
     # Process in batches to avoid memory issues
     for i in range(0, len(contents), batch_size):
-        print(f"\n--- Processing batch {i//batch_size + 1} ---")    #DEBUG
         batch_end = min(i + batch_size, len(contents))
-
+        
         # Get batch slices
         batch_urls = urls[i:batch_end]
         batch_chunk_numbers = chunk_numbers[i:batch_end]
         batch_contents = contents[i:batch_end]
         batch_metadatas = metadatas[i:batch_end]
-
-        print(f"Batch size: {len(batch_contents)} items")   # DEBUG
-        print(f"Sample batch URL: {batch_urls[0] if batch_urls else 'None'}")   # DEBUG
-
+        
         # Apply contextual embedding to each chunk if enabled
+        final_contents = []
+        
         if use_contextual_embeddings:
             # Prepare arguments for parallel processing
             process_args = []
@@ -788,98 +770,76 @@ def add_documents_to_chroma(
                 url = batch_urls[j]
                 full_document = url_to_full_document.get(url, "")
                 process_args.append((url, content, full_document))
-
+            
             # Process in parallel using ThreadPoolExecutor
-            contextual_contents = []
             with concurrent.futures.ThreadPoolExecutor(max_workers=LLM_MAX_CONCURRENCY) as executor:
                 # Submit all tasks and collect results
                 future_to_idx = {executor.submit(process_chunk_with_context, arg): idx
                                 for idx, arg in enumerate(process_args)}
-
+                
                 # Process results as they complete
+                contextual_results = [None] * len(process_args)
                 for future in concurrent.futures.as_completed(future_to_idx):
                     idx = future_to_idx[future]
                     try:
                         result, success = future.result()
-                        contextual_contents.append(result)
+                        contextual_results[idx] = result
                         if success:
                             batch_metadatas[idx]["contextual_embedding"] = True
                     except Exception as e:
                         print(f"Error processing chunk {idx}: {e}")
                         # Use original content as fallback
-                        contextual_contents.append(batch_contents[idx])
-
-            # Sort results back into original order if needed
-            if len(contextual_contents) != len(batch_contents):
-                print(f"Warning: Expected {len(batch_contents)} results but got {len(contextual_contents)}")
-                # Use original contents as fallback
-                contextual_contents = batch_contents
+                        contextual_results[idx] = batch_contents[idx]
+                
+                final_contents = contextual_results
         else:
             # If not using contextual embeddings, use original contents
-            contextual_contents = batch_contents
-
+            final_contents = batch_contents
+        
         # Create embeddings for the entire batch at once
-        print(f"Creating embeddings for {len(contextual_contents)} texts...")   # DEBUG
-        batch_embeddings = create_embeddings_batch(contextual_contents)
-        print(f"Created {len(batch_embeddings)} embeddings")    # DEBUG
-
-        # DEBUG: BEGIN
-        # Check for valid embeddings
-        valid_embeddings = 0
-        for j, embedding in enumerate(batch_embeddings):
-            if embedding and len(embedding) == 1536 and not all(v == 0.0 for v in embedding):
-                valid_embeddings += 1
-        print(f"Valid embeddings: {valid_embeddings}/{len(batch_embeddings)}")
-        # DEBUG: END
-
+        batch_embeddings = create_embeddings_batch(final_contents)
+        
         # Validate embedding dimensions
         for j, embedding in enumerate(batch_embeddings):
             if len(embedding) != 1536:
-                print(f"⚠ Warning: Embedding dimension mismatch for batch item {j}: expected 1536, got {len(embedding)}")
+                print(f"⚠️  Warning: Embedding dimension mismatch for batch item {j}: expected 1536, got {len(embedding)}")
                 # Fix the dimension
                 if len(embedding) < 1536:
                     embedding.extend([0.0] * (1536 - len(embedding)))
                 else:
                     batch_embeddings[j] = embedding[:1536]
-
+        
         # Prepare batch data for Chroma
         batch_ids = []
         batch_documents = []
         batch_embeddings_final = []
         batch_metadatas_final = []
-
-        for j in range(len(contextual_contents)):
+        
+        for j in range(len(final_contents)):
             # Create unique ID combining URL and chunk number
             doc_id = f"{extract_source_id(batch_urls[j])}_chunk_{batch_chunk_numbers[j]}_{hash(batch_urls[j]) % 10000}"
-
+            
             # Extract source_id from URL
             source_id = extract_source_id(batch_urls[j])
-
+            
             # Prepare metadata for Chroma (matching SQL schema)
             metadata = {
                 "url": batch_urls[j],
                 "chunk_number": batch_chunk_numbers[j],
-                "content": batch_contents[j],  # Store original content in metadata
-                "metadata": batch_metadatas[j],  # Original JSON metadata
                 "source_id": source_id,
+                "metadata": batch_metadatas[j],  # Original JSON metadata
                 "created_at": datetime.utcnow().isoformat() + "Z"
             }
-
+            
             batch_ids.append(doc_id)
-            batch_documents.append(contextual_contents[j])  # Document text for embedding
+            batch_documents.append(final_contents[j])  # Document text for embedding and search
             batch_embeddings_final.append(batch_embeddings[j])
             batch_metadatas_final.append(metadata)
-
+        
         # Insert batch into Chroma with retry logic
         max_retries = 3
         retry_delay = 1.0  # Start with 1 second delay
-
-        # DEBUG: BEGIN
-        print(f"Attempting to insert {len(batch_ids)} documents...")
-        print(f"Sample document ID: {batch_ids[0] if batch_ids else 'None'}")
-        print(f"Sample document length: {len(batch_documents[0]) if batch_documents else 0}")
-        # DEBUG: END
-
+        
         for retry in range(max_retries):
             try:
                 collection.add(
@@ -889,11 +849,6 @@ def add_documents_to_chroma(
                     metadatas=batch_metadatas_final
                 )
                 print(f"Successfully inserted batch {i//batch_size + 1} of {(len(contents) + batch_size - 1)//batch_size}")
-
-                # DEBUG: Check collection count after insertion
-                new_count = collection.count()
-                print(f"Collection count after insertion: {new_count}")
-                # DEBUG: END
                 # Success - break out of retry loop
                 break
             except Exception as e:
@@ -919,7 +874,7 @@ def add_documents_to_chroma(
                             successful_inserts += 1
                         except Exception as individual_error:
                             print(f"Failed to insert individual record for URL {batch_urls[k]}: {individual_error}")
-
+                    
                     if successful_inserts > 0:
                         print(f"Successfully inserted {successful_inserts}/{len(batch_ids)} records individually")
 
@@ -931,68 +886,161 @@ def search_documents(
 ) -> List[Dict[str, Any]]:
     """
     Search for documents in Chroma using vector similarity.
-
+    
     Args:
         client: Chroma client
         query: Query text
         match_count: Maximum number of results to return
         filter_metadata: Optional metadata filter
-
+        
     Returns:
         List of matching documents
     """
     try:
         # Get the crawled_pages collection
         collection = client.get_collection("crawled_pages")
-
-        # Create embedding for the query
-        query_embedding = create_embedding(query)
-
+        
+        # Enhance query if contextual embeddings were used during storage
+        use_contextual_embeddings = os.getenv("USE_CONTEXTUAL_EMBEDDINGS", "false") == "true"
+        
+        if use_contextual_embeddings:
+            # Create enhanced query to match the contextual embedding pattern used during storage
+            enhanced_query = f"Documentation about {query}. Context: {query}"
+            query_embedding = create_embedding(enhanced_query)
+        else:
+            # Create embedding for the query
+            query_embedding = create_embedding(query)
+        
         # Validate query embedding dimension
         if len(query_embedding) != 1536:
-            print(f"⚠ Warning: Query embedding dimension mismatch: expected 1536, got {len(query_embedding)}")
+            print(f"⚠️  Warning: Query embedding dimension mismatch: expected 1536, got {len(query_embedding)}")
             # Fix the dimension
             if len(query_embedding) < 1536:
                 query_embedding.extend([0.0] * (1536 - len(query_embedding)))
             else:
                 query_embedding = query_embedding[:1536]
-
+        
         # Prepare where clause for filtering
         where_clause = None
         if filter_metadata:
             where_clause = filter_metadata
-
+        
         # Execute the search
         results = collection.query(
             query_embeddings=[query_embedding],
             n_results=match_count,
             where=where_clause
         )
-
+        
         formatted_results = []
         if results['ids'] and len(results['ids']) > 0:
             for i, doc_id in enumerate(results['ids'][0]):
                 # Calculate similarity score (Chroma returns distances, we want similarity)
                 distance = results['distances'][0][i] if results['distances'] else 0
                 similarity = 1 - distance  # Convert distance to similarity
-
+                
                 metadata = results['metadatas'][0][i]
-
+                
                 formatted_result = {
                     "id": doc_id,
                     "url": metadata.get("url"),
                     "chunk_number": metadata.get("chunk_number"),
-                    "content": metadata.get("content"),
+                    "content": results['documents'][0][i],  # Get the actual searchable content
                     "metadata": metadata.get("metadata", {}),
                     "source_id": metadata.get("source_id"),
                     "similarity": similarity
                 }
                 formatted_results.append(formatted_result)
-
+        
         return formatted_results
-
+        
     except Exception as e:
         print(f"Error searching documents: {e}")
+        return []
+
+
+def search_code_examples(
+    client: ClientAPI,
+    query: str,
+    match_count: int = 10,
+    filter_metadata: Optional[Dict[str, Any]] = None,
+    source_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Search for code examples in Chroma using vector similarity.
+    
+    Args:
+        client: Chroma client
+        query: Query text
+        match_count: Maximum number of results to return
+        filter_metadata: Optional metadata filter
+        source_id: Optional source ID to filter results
+        
+    Returns:
+        List of matching code examples
+    """
+    try:
+        # Get the code_examples collection
+        collection = client.get_collection("code_examples")
+        
+        # Create a more descriptive query for better embedding match
+        # Since code examples are embedded with their summaries, we should make the query more descriptive
+        enhanced_query = f"Code example for {query}\n\nSummary: Example code showing {query}"
+        
+        # Create embedding for the enhanced query
+        query_embedding = create_embedding(enhanced_query)
+        
+        # Validate query embedding dimension
+        if len(query_embedding) != 1536:
+            print(f"⚠️  Warning: Query embedding dimension mismatch: expected 1536, got {len(query_embedding)}")
+            # Fix the dimension
+            if len(query_embedding) < 1536:
+                query_embedding.extend([0.0] * (1536 - len(query_embedding)))
+            else:
+                query_embedding = query_embedding[:1536]
+        
+        # Prepare where clause for filtering
+        where_clause = {}
+        if filter_metadata:
+            where_clause.update(filter_metadata)
+        if source_id:
+            where_clause["source_id"] = source_id
+        
+        # Use where_clause only if it has content
+        where_param = where_clause if where_clause else None
+        
+        # Execute the search
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=match_count,
+            where=where_param
+        )
+        
+        formatted_results = []
+        if results['ids'] and len(results['ids']) > 0:
+            for i, doc_id in enumerate(results['ids'][0]):
+                # Calculate similarity score (Chroma returns distances, we want similarity)
+                distance = results['distances'][0][i] if results['distances'] else 0
+                similarity = 1 - distance  # Convert distance to similarity
+                
+                metadata = results['metadatas'][0][i]
+                
+                formatted_result = {
+                    "id": doc_id,
+                    "url": metadata.get("url"),
+                    "chunk_number": metadata.get("chunk_number"),
+                    "content": metadata.get("content"),  # Code content from metadata
+                    "summary": metadata.get("summary"),  # Code description from metadata
+                    "metadata": metadata.get("metadata", {}),
+                    "source_id": metadata.get("source_id"),
+                    "similarity": similarity
+                }
+                formatted_results.append(formatted_result)
+        
+        return formatted_results
+        
+    except Exception as e:
+        print(f"Error searching code examples: {e}")
         return []
 
 def extract_code_blocks(markdown_content: str, min_length: int = 1000) -> List[Dict[str, Any]]:
