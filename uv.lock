@@ -479,7 +479,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "chromadb", specifier = ">=1.0.20" },
+    { name = "chromadb", specifier = "==1.0.20" },
     { name = "crawl4ai", specifier = "==0.6.2" },
     { name = "dotenv", specifier = "==0.9.9" },
     { name = "mcp", specifier = "==1.7.1" },

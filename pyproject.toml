@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "crawl4ai==0.6.2",
     "mcp==1.7.1",
-    "chromadb>=1.0.20",
+    "chromadb==1.0.20",
     "openai==1.71.0",
     "dotenv==0.9.9",
     "sentence-transformers>=4.1.0",
