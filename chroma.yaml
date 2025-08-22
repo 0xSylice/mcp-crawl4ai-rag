@@ -1,12 +1,6 @@
 ########################
 # HTTP server settings #
 ########################
-open_telemetry:
-  service_name: "chroma"
-  endpoint: "http://otel-collector:4317"
-  filters:
-    - crate_name: "chroma_frontend"
-      filter_level: "error"
 port: 9000
 listen_address: "127.0.0.1"
 max_payload_size_bytes: 41943040
