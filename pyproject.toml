@@ -6,10 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "crawl4ai==0.6.2",
-    "mcp==1.7.1",
+    "mcp=1.13.1",
     "supabase==2.15.1",
-    "openai==1.71.0",
-    "dotenv==0.9.9",
+    "openai==1.101.0",
+    "python-dotenv>=1.1.1",
     "sentence-transformers>=4.1.0",
     "neo4j>=5.28.1",
 ]
