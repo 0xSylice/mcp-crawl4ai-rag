@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, urldefrag
 from xml.etree import ElementTree
 from dotenv import load_dotenv
-from supabase import Client
+import chromadb
 from pathlib import Path
 import requests
 import asyncio
@@ -31,12 +31,16 @@ knowledge_graphs_path = Path(__file__).resolve().parent.parent / 'knowledge_grap
 sys.path.append(str(knowledge_graphs_path))
 
 from utils import (
-    get_supabase_client,
-    add_documents_to_supabase,
+    check_chroma_server,
+    check_collections_exist,
+    verify_collection_schema,
+    create_collections,
+    get_chroma_client,
+    add_documents_to_vecdb,
     search_documents,
     extract_code_blocks,
     generate_code_example_summary,
-    add_code_examples_to_supabase,
+    add_code_examples_to_vecdb,
     extract_source_id,
     update_source_info,
     extract_source_summary,
@@ -45,10 +49,17 @@ from utils import (
 )
 
 # Import knowledge graph modules
-from knowledge_graph_validator import KnowledgeGraphValidator
-from parse_repo_into_neo4j import DirectNeo4jExtractor
-from ai_script_analyzer import AIScriptAnalyzer
-from hallucination_reporter import HallucinationReporter
+try:
+    from knowledge_graph_validator import KnowledgeGraphValidator
+    from parse_repo_into_neo4j import DirectNeo4jExtractor
+    from ai_script_analyzer import AIScriptAnalyzer
+    from hallucination_reporter import HallucinationReporter
+except ImportError:
+    # Knowledge graph modules not available
+    KnowledgeGraphValidator = None
+    DirectNeo4jExtractor = None
+    AIScriptAnalyzer = None
+    HallucinationReporter = None
 
 # Helper: find a .env by checking exactly three locations (in this order):
 # 1) script_dir.parent (same as project root in src/*.py)
@@ -144,10 +155,78 @@ def validate_github_url(repo_url: str) -> Dict[str, Any]:
 class Crawl4AIContext:
     """Context for the Crawl4AI MCP server."""
     crawler: AsyncWebCrawler
-    supabase_client: Client
+    vecdb_client: chromadb.ClientAPI
     reranking_model: Optional[CrossEncoder] = None
     knowledge_validator: Optional[Any] = None  # KnowledgeGraphValidator when available
     repo_extractor: Optional[Any] = None       # DirectNeo4jExtractor when available
+
+async def initialize_vecdb() -> chromadb.ClientAPI:
+    """
+    Initialize Vector database with pre-flight checks and collection setup.
+
+    Returns:
+        Chroma client instance
+
+    Raises:
+        SystemExit: If Vector database server is not accessible or collections cannot be set up
+    """
+    print("🔍 Performing Vector database pre-flight checks...")
+
+    # Check if Chroma server is running
+    if not check_chroma_server():
+        chroma_host = os.getenv("CHROMA_HOST", "127.0.0.1")
+        chroma_port = os.getenv("CHROMA_PORT", "9000")
+        print(f"❌ Vector database server not accessible at {chroma_host}:{chroma_port}")
+        print("Please ensure Vector database server is running and accessible.")
+        sys.exit(1)
+
+    print("✅ Vector database server is accessible")
+
+    # Get client
+    try:
+        client = get_chroma_client()
+        print("✅ Vector database client connected")
+    except Exception as e:
+        print(f"❌ Failed to connect to Vector database: {e}")
+        sys.exit(1)
+
+    # Check if required collections exist
+    collections_status = check_collections_exist(client)
+    missing_collections = [name for name, exists in collections_status.items() if not exists]
+
+    if missing_collections:
+        print(f"⚠️  Missing collections: {', '.join(missing_collections)}")
+        print("The following collections are required:")
+        print("  - sources: Source information and summaries")
+        print("  - crawled_pages: Document chunks with embeddings")
+        print("  - code_examples: Code examples with embeddings and summaries")
+        print()
+
+        response = input("Do you want to create the missing collections? (Y/n): ").strip().lower()
+        if response in ['n', 'no']:
+            print("❌ Collections are required for operation. Exiting.")
+            sys.exit(1)
+
+        print("📝 Creating missing collections...")
+        if create_collections(client):
+            print("✅ All collections created successfully")
+        else:
+            print("❌ Failed to create collections. Exiting.")
+            sys.exit(1)
+    else:
+        print("✅ All required collections exist")
+
+    # Verify collection schema
+    if not verify_collection_schema(client):
+        print("❌ Collection schema verification failed.")
+        print("The existing collections do not match the expected structure.")
+        print("Please check your Vector database setup and try again.")
+        sys.exit(1)
+
+    print("✅ Collection schema verified")
+    print("🚀 Vector database initialization complete")
+
+    return client
 
 @asynccontextmanager
 async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
@@ -158,7 +237,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
         server: The FastMCP server instance
 
     Yields:
-        Crawl4AIContext: The context containing the Crawl4AI crawler and Supabase client
+        Crawl4AIContext: The context containing the Crawl4AI crawler and Vector database client
     """
     # Create browser configuration
     browser_config = BrowserConfig(
@@ -170,8 +249,8 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     crawler = AsyncWebCrawler(config=browser_config)
     await crawler.__aenter__()
 
-    # Initialize Supabase client
-    supabase_client = get_supabase_client()
+    # Initialize Vector database client with pre-flight checks
+    vecdb_client = await initialize_vecdb()
 
     # Initialize cross-encoder model for reranking if enabled
     reranking_model = None
@@ -194,7 +273,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
         neo4j_user = os.getenv("NEO4J_USER")
         neo4j_password = os.getenv("NEO4J_PASSWORD")
 
-        if neo4j_uri and neo4j_user and neo4j_password:
+        if neo4j_uri and neo4j_user and neo4j_password and KnowledgeGraphValidator:
             try:
                 print("Initializing knowledge graph components...")
 
@@ -220,7 +299,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     try:
         yield Crawl4AIContext(
             crawler=crawler,
-            supabase_client=supabase_client,
+            vecdb_client=vecdb_client,
             reranking_model=reranking_model,
             knowledge_validator=knowledge_validator,
             repo_extractor=repo_extractor
@@ -415,22 +494,22 @@ def process_code_example(args):
 @mcp.tool()
 async def crawl_single_page(ctx: Context, url: str) -> str:
     """
-    Crawl a single web page and store its content in Supabase.
+    Crawl a single web page and store its content in Vector database.
 
     This tool is ideal for quickly retrieving content from a specific URL without following links.
-    The content is stored in Supabase for later retrieval and querying.
+    The content is stored in Vector database for later retrieval and querying.
 
     Args:
         ctx: The MCP server provided context
         url: URL of the web page to crawl
 
     Returns:
-        Summary of the crawling operation and storage in Supabase
+        Summary of the crawling operation and storage in Vector database
     """
     try:
         # Get the crawler from the context
         crawler = ctx.request_context.lifespan_context.crawler
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        vecdb_client = ctx.request_context.lifespan_context.vecdb_client
 
         # Configure the crawl
         run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
@@ -445,7 +524,7 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
             # Chunk the content
             chunks = smart_chunk_markdown(result.markdown)
 
-            # Prepare data for Supabase
+            # Prepare data for Vector database
             urls = []
             chunk_numbers = []
             contents = []
@@ -473,10 +552,10 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
 
             # Update source information FIRST (before inserting documents)
             source_summary = extract_source_summary(source_id, result.markdown[:5000])  # Use first 5000 chars for summary
-            update_source_info(supabase_client, source_id, source_summary, total_word_count)
+            update_source_info(vecdb_client, source_id, source_summary, total_word_count)
 
-            # Add documentation chunks to Supabase (AFTER source exists)
-            add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
+            # Add documentation chunks to Vector database (AFTER source exists)
+            add_documents_to_vecdb(vecdb_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
 
             # Extract and process code examples only if enabled
             extract_code_examples = os.getenv("USE_AGENTIC_RAG", "false") == "true"
@@ -517,9 +596,9 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
                         }
                         code_metadatas.append(code_meta)
 
-                    # Add code examples to Supabase
-                    add_code_examples_to_supabase(
-                        supabase_client,
+                    # Add code examples to Vector database
+                    add_code_examples_to_vecdb(
+                        vecdb_client,
                         code_urls,
                         code_chunk_numbers,
                         code_examples,
@@ -556,14 +635,14 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
 @mcp.tool()
 async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concurrent: int = 10, chunk_size: int = 5000) -> str:
     """
-    Intelligently crawl a URL based on its type and store content in Supabase.
+    Intelligently crawl a URL based on its type and store content in Vector database.
 
     This tool automatically detects the URL type and applies the appropriate crawling method:
     - For sitemaps: Extracts and crawls all URLs in parallel
     - For text files (llms.txt): Directly retrieves the content
     - For regular webpages: Recursively crawls internal links up to the specified depth
 
-    All crawled content is chunked and stored in Supabase for later retrieval and querying.
+    All crawled content is chunked and stored in Vector database for later retrieval and querying.
 
     Args:
         ctx: The MCP server provided context
@@ -578,7 +657,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
     try:
         # Get the crawler from the context
         crawler = ctx.request_context.lifespan_context.crawler
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        vecdb_client = ctx.request_context.lifespan_context.vecdb_client
 
         # Determine the crawl strategy
         crawl_results = []
@@ -611,7 +690,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                 "error": "No content found"
             }, indent=2)
 
-        # Process results and store in Supabase
+        # Process results and store in Vector database
         urls = []
         chunk_numbers = []
         contents = []
@@ -667,11 +746,11 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
 
         for (source_id, _), summary in zip(source_summary_args, source_summaries):
             word_count = source_word_counts.get(source_id, 0)
-            update_source_info(supabase_client, source_id, summary, word_count)
+            update_source_info(vecdb_client, source_id, summary, word_count)
 
-        # Add documentation chunks to Supabase (AFTER sources exist)
+        # Add documentation chunks to Vector database (AFTER sources exist)
         batch_size = 20
-        add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
+        add_documents_to_vecdb(vecdb_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
         code_blocks = []
         code_examples = []
         # Extract and process code examples from all documents only if enabled
@@ -719,10 +798,10 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                         }
                         code_metadatas.append(code_meta)
 
-            # Add all code examples to Supabase
+            # Add all code examples to Vector database
             if code_examples:
-                add_code_examples_to_supabase(
-                    supabase_client,
+                add_code_examples_to_vecdb(
+                    vecdb_client,
                     code_urls,
                     code_chunk_numbers,
                     code_examples,
@@ -751,7 +830,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
 @mcp.tool()
 async def get_available_sources(ctx: Context) -> str:
     """
-    Get all available sources from the sources table.
+    Get all available sources from the sources collection.
 
     This tool returns a list of all unique sources (domains) that have been crawled and stored
     in the database, along with their summaries and statistics. This is useful for discovering
@@ -767,25 +846,23 @@ async def get_available_sources(ctx: Context) -> str:
         JSON string with the list of available sources and their details
     """
     try:
-        # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        # Get the Vector database client from the context
+        vecdb_client = ctx.request_context.lifespan_context.vecdb_client
 
-        # Query the sources table directly
-        result = supabase_client.from_('sources')\
-            .select('*')\
-            .order('source_id')\
-            .execute()
+        # Query the sources collection directly
+        collection = vecdb_client.get_collection("sources")
+        results = collection.get(include=["metadatas"])
 
         # Format the sources with their details
         sources = []
-        if result.data:
-            for source in result.data:
+        if results["metadatas"]:
+            for metadata in results["metadatas"]:
                 sources.append({
-                    "source_id": source.get("source_id"),
-                    "summary": source.get("summary"),
-                    "total_words": source.get("total_words"),
-                    "created_at": source.get("created_at"),
-                    "updated_at": source.get("updated_at")
+                    "source_id": metadata.get("source_id"),
+                    "summary": metadata.get("summary"),
+                    "total_words": metadata.get("total_word_count"),
+                    "created_at": metadata.get("created_at"),
+                    "updated_at": metadata.get("updated_at")
                 })
 
         return json.dumps({
@@ -818,8 +895,8 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
         JSON string with the search results
     """
     try:
-        # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        # Get the Vector database client from the context
+        vecdb_client = ctx.request_context.lifespan_context.vecdb_client
 
         # Check if hybrid search is enabled
         use_hybrid_search = os.getenv("USE_HYBRID_SEARCH", "false") == "true"
@@ -827,31 +904,40 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
         # Prepare filter if source is provided and not empty
         filter_metadata = None
         if source and source.strip():
-            filter_metadata = {"source": source}
+            filter_metadata = {"source_id": source}
 
         if use_hybrid_search:
             # Hybrid search: combine vector and keyword search
 
             # 1. Get vector search results (get more to account for filtering)
             vector_results = search_documents(
-                client=supabase_client,
+                client=vecdb_client,
                 query=query,
                 match_count=match_count * 2,  # Get double to have room for filtering
                 filter_metadata=filter_metadata
             )
 
-            # 2. Get keyword search results using ILIKE
-            keyword_query = supabase_client.from_('crawled_pages')\
-                .select('id, url, chunk_number, content, metadata, source_id')\
-                .ilike('content', f'%{query}%')
+            # 2. Get keyword search results using collection query
+            collection = vecdb_client.get_collection("crawled_pages")
+            all_docs = collection.get(
+                where=filter_metadata,
+                include=["documents", "metadatas"]
+            )
 
-            # Apply source filter if provided
-            if source and source.strip():
-                keyword_query = keyword_query.eq('source_id', source)
-
-            # Execute keyword search
-            keyword_response = keyword_query.limit(match_count * 2).execute()
-            keyword_results = keyword_response.data if keyword_response.data else []
+            # Filter documents that contain the query keywords
+            keyword_results = []
+            if all_docs["documents"]:
+                for i, doc in enumerate(all_docs["documents"]):
+                    if query.lower() in doc.lower():
+                        keyword_results.append({
+                            'id': all_docs["ids"][i] if "ids" in all_docs else f"keyword_{i}",
+                            'url': all_docs["metadatas"][i].get("url"),
+                            'chunk_number': all_docs["metadatas"][i].get("chunk_number"),
+                            'content': doc,
+                            'metadata': all_docs["metadatas"][i],
+                            'source_id': all_docs["metadatas"][i].get("source_id"),
+                            'similarity': 0.5  # Default similarity for keyword matches
+                        })
 
             # 3. Combine results with preference for items appearing in both
             seen_ids = set()
@@ -879,16 +965,7 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
             # Finally, add pure keyword matches if we still need more results
             for kr in keyword_results:
                 if kr['id'] not in seen_ids and len(combined_results) < match_count:
-                    # Convert keyword result to match vector result format
-                    combined_results.append({
-                        'id': kr['id'],
-                        'url': kr['url'],
-                        'chunk_number': kr['chunk_number'],
-                        'content': kr['content'],
-                        'metadata': kr['metadata'],
-                        'source_id': kr['source_id'],
-                        'similarity': 0.5  # Default similarity for keyword-only matches
-                    })
+                    combined_results.append(kr)
                     seen_ids.add(kr['id'])
 
             # Use combined results
@@ -897,7 +974,7 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
         else:
             # Standard vector search only
             results = search_documents(
-                client=supabase_client,
+                client=vecdb_client,
                 query=query,
                 match_count=match_count,
                 filter_metadata=filter_metadata
@@ -967,8 +1044,8 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
         }, indent=2)
 
     try:
-        # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        # Get the Vector database client from the context
+        vecdb_client = ctx.request_context.lifespan_context.vecdb_client
 
         # Check if hybrid search is enabled
         use_hybrid_search = os.getenv("USE_HYBRID_SEARCH", "false") == "true"
@@ -976,34 +1053,44 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
         # Prepare filter if source is provided and not empty
         filter_metadata = None
         if source_id and source_id.strip():
-            filter_metadata = {"source": source_id}
+            filter_metadata = {"source_id": source_id}
 
         if use_hybrid_search:
             # Hybrid search: combine vector and keyword search
 
-            # Import the search function from utils
-            from utils import search_code_examples as search_code_examples_impl
-
             # 1. Get vector search results (get more to account for filtering)
-            vector_results = search_code_examples_impl(
-                client=supabase_client,
+            vector_results = search_code_examples(
+                client=vecdb_client,
                 query=query,
                 match_count=match_count * 2,  # Get double to have room for filtering
-                filter_metadata=filter_metadata
+                filter_metadata=filter_metadata,
+                source_id=source_id
             )
 
-            # 2. Get keyword search results using ILIKE on both content and summary
-            keyword_query = supabase_client.from_('code_examples')\
-                .select('id, url, chunk_number, content, summary, metadata, source_id')\
-                .or_(f'content.ilike.%{query}%,summary.ilike.%{query}%')
+            # 2. Get keyword search results using collection query
+            collection = vecdb_client.get_collection("code_examples")
+            all_docs = collection.get(
+                where=filter_metadata,
+                include=["documents", "metadatas"]
+            )
 
-            # Apply source filter if provided
-            if source_id and source_id.strip():
-                keyword_query = keyword_query.eq('source_id', source_id)
-
-            # Execute keyword search
-            keyword_response = keyword_query.limit(match_count * 2).execute()
-            keyword_results = keyword_response.data if keyword_response.data else []
+            # Filter documents that contain the query keywords in content or summary
+            keyword_results = []
+            if all_docs["documents"]:
+                for i, doc in enumerate(all_docs["documents"]):
+                    metadata = all_docs["metadatas"][i]
+                    summary = metadata.get("summary", "")
+                    if query.lower() in doc.lower() or query.lower() in summary.lower():
+                        keyword_results.append({
+                            'id': all_docs["ids"][i] if "ids" in all_docs else f"keyword_{i}",
+                            'url': metadata.get("url"),
+                            'chunk_number': metadata.get("chunk_number"),
+                            'content': doc,
+                            'summary': summary,
+                            'metadata': metadata,
+                            'source_id': metadata.get("source_id"),
+                            'similarity': 0.5  # Default similarity for keyword matches
+                        })
 
             # 3. Combine results with preference for items appearing in both
             seen_ids = set()
@@ -1031,17 +1118,7 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
             # Finally, add pure keyword matches if we still need more results
             for kr in keyword_results:
                 if kr['id'] not in seen_ids and len(combined_results) < match_count:
-                    # Convert keyword result to match vector result format
-                    combined_results.append({
-                        'id': kr['id'],
-                        'url': kr['url'],
-                        'chunk_number': kr['chunk_number'],
-                        'content': kr['content'],
-                        'summary': kr['summary'],
-                        'metadata': kr['metadata'],
-                        'source_id': kr['source_id'],
-                        'similarity': 0.5  # Default similarity for keyword-only matches
-                    })
+                    combined_results.append(kr)
                     seen_ids.add(kr['id'])
 
             # Use combined results
@@ -1049,13 +1126,12 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
 
         else:
             # Standard vector search only
-            from utils import search_code_examples as search_code_examples_impl
-
-            results = search_code_examples_impl(
-                client=supabase_client,
+            results = search_code_examples(
+                client=vecdb_client,
                 query=query,
                 match_count=match_count,
-                filter_metadata=filter_metadata
+                filter_metadata=filter_metadata,
+                source_id=source_id
             )
 
         # Apply reranking if enabled
@@ -1146,6 +1222,12 @@ async def check_ai_script_hallucinations(ctx: Context, script_path: str) -> str:
             }, indent=2)
 
         # Step 1: Analyze script structure using AST
+        if not AIScriptAnalyzer:
+            return json.dumps({
+                "success": False,
+                "error": "AI script analyzer not available. Check knowledge graph module imports."
+            }, indent=2)
+
         analyzer = AIScriptAnalyzer()
         analysis_result = analyzer.analyze_script(script_path)
 
@@ -1156,6 +1238,12 @@ async def check_ai_script_hallucinations(ctx: Context, script_path: str) -> str:
         validation_result = await knowledge_validator.validate_script(analysis_result)
 
         # Step 3: Generate comprehensive report
+        if not HallucinationReporter:
+            return json.dumps({
+                "success": False,
+                "error": "Hallucination reporter not available. Check knowledge graph module imports."
+            }, indent=2)
+
         reporter = HallucinationReporter()
         report = reporter.generate_comprehensive_report(validation_result)
 
@@ -1343,7 +1431,6 @@ async def query_knowledge_graph(ctx: Context, command: str) -> str:
             "error": f"Query execution failed: {str(e)}"
         }, indent=2)
 
-
 async def _handle_repos_command(session, command: str) -> str:
     """Handle 'repos' command - list all repositories"""
     query = "MATCH (r:Repository) RETURN r.name as name ORDER BY r.name"
@@ -1364,7 +1451,6 @@ async def _handle_repos_command(session, command: str) -> str:
             "limited": False
         }
     }, indent=2)
-
 
 async def _handle_explore_command(session, command: str, repo_name: str) -> str:
     """Handle 'explore <repo>' command - get repository overview"""
@@ -1430,7 +1516,6 @@ async def _handle_explore_command(session, command: str, repo_name: str) -> str:
         }
     }, indent=2)
 
-
 async def _handle_classes_command(session, command: str, repo_name: str = None) -> str:
     """Handle 'classes [repo]' command - list classes"""
     limit = 20
@@ -1471,7 +1556,6 @@ async def _handle_classes_command(session, command: str, repo_name: str = None) 
             "limited": len(classes) >= limit
         }
     }, indent=2)
-
 
 async def _handle_class_command(session, command: str, class_name: str) -> str:
     """Handle 'class <name>' command - explore specific class"""
@@ -1549,7 +1633,6 @@ async def _handle_class_command(session, command: str, class_name: str) -> str:
         }
     }, indent=2)
 
-
 async def _handle_method_command(session, command: str, method_name: str, class_name: str = None) -> str:
     """Handle 'method <name> [class]' command - search for methods"""
     if class_name:
@@ -1607,7 +1690,6 @@ async def _handle_method_command(session, command: str, method_name: str, class_
         }
     }, indent=2)
 
-
 async def _handle_query_command(session, command: str, cypher_query: str) -> str:
     """Handle 'query <cypher>' command - execute custom Cypher query"""
     try:
@@ -1644,7 +1726,6 @@ async def _handle_query_command(session, command: str, cypher_query: str) -> str
                 "query": cypher_query
             }
         }, indent=2)
-
 
 # Reusable query for getting repository statistics
 REPO_STATS_QUERY = """
@@ -1822,7 +1903,6 @@ async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_l
             "folder_path" if is_local else "repo_url": repo_identifier
         }
 
-
 @mcp.tool()
 async def parse_github_repository(ctx: Context, repo_url: str) -> str:
     """
@@ -1859,7 +1939,6 @@ async def parse_github_repository(ctx: Context, repo_url: str) -> str:
         })
 
     return json.dumps(result, indent=2)
-
 
 @mcp.tool()
 async def parse_local_repository(ctx: Context, folder_path: str) -> str:
@@ -1990,23 +2069,26 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
             if result.success and result.markdown:
                 results_all.append({'url': result.url, 'markdown': result.markdown})
                 for link in result.links.get("internal", []):
-                    link_href = link["href"]
-
-                    # Handle different types of internal links
-                    if link_href.startswith('http'):
-                        # Absolute URL - use as is if it's on the same domain
-                        next_url = normalize_url(link_href)
-                    elif link_href.startswith('/'):
-                        # Root-relative URL - prepend base domain
-                        next_url = normalize_url(f"{base_domain}{link_href}")
-                    else:
-                        # Relative URL - resolve against current URL
-                        from urllib.parse import urljoin
-                        next_url = normalize_url(urljoin(norm_url, link_href))
-
-                    # Only add if it's on the same domain and not already visited
-                    if next_url.startswith(base_domain) and next_url not in visited:
-                        next_level_urls.add(next_url)
+                    # The crawler is not handling internal links correctly, so let's fix it here as a work around
+                    # Check if norm_url is substring of internal link href
+                    if norm_url in link["href"]:
+                        # Normalise the link first
+                        norm_link = normalize_url(link["href"])
+                        # Cut norm_url from internal to get relative path
+                        relative_path = norm_link.replace(norm_url, "")
+                        # prune leading / from relative path to avoid empty string later
+                        if relative_path.startswith("/"):
+                            relative_path = relative_path[1:]
+                        # if rel path not empty
+                        if relative_path:
+                            # Trim page/file ref from norm_url (everything after last '/')
+                            base_url = norm_url.rsplit('/', 1)[0]
+                            # Concat proper relative path to trimmed norm_url
+                            corrected_url = f"{base_url}/{relative_path}"
+                            # now this is sorted, we will stick with the established var names for consitency
+                            next_url = corrected_url
+                            if next_url not in visited:
+                                next_level_urls.add(next_url)
 
         current_urls = next_level_urls
 
