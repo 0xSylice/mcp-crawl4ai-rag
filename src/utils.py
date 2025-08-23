@@ -89,7 +89,6 @@ def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
     retry_delay = 1.0  # Start with 1 second delay
 
     for retry in range(max_retries):
-        print(f"Using model: text-embedding-3-small")
         try:
             response = _with_llm_limits(
                 openai.embeddings.create,
@@ -171,7 +170,6 @@ Here is the chunk we want to situate within the whole document
 </chunk>
 Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else."""
 
-        print(f"Using model: {model_choice}")
         # Call the OpenAI API to generate contextual information
         response = _with_llm_limits(
             openai.chat.completions.create,
@@ -514,7 +512,6 @@ def generate_code_example_summary(code: str, context_before: str, context_after:
 Based on the code example and its surrounding context, provide a concise summary (2-3 sentences) that describes what this code example demonstrates and its purpose. Focus on the practical application and key concepts illustrated.
 """
 
-    print(f"Using model: {model_choice}")
     try:
         response = _with_llm_limits(
             openai.chat.completions.create,
@@ -709,7 +706,6 @@ def extract_source_summary(source_id: str, content: str, max_length: int = 500) 
 The above content is from the documentation for '{source_id}'. Please provide a concise summary (3-5 sentences) that describes what this library/tool/framework is about. The summary should help understand what the library/tool/framework accomplishes and the purpose.
 """
 
-    print(f"Using model: {model_choice}")
     try:
         # Call the OpenAI API to generate the summary
         response = _with_llm_limits(
