@@ -244,7 +244,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
 # Initialize FastMCP server
 mcp = FastMCP(
     "mcp-crawl4ai-rag",
-    description="MCP server for RAG and web crawling with Crawl4AI",
+    # description="MCP server for RAG and web crawling with Crawl4AI",
     lifespan=crawl4ai_lifespan,
     host=os.getenv("HOST", "0.0.0.0"),
     port=int(os.getenv("PORT", "8051"))
