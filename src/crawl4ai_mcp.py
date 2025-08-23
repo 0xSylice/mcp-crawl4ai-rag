@@ -2020,13 +2020,13 @@ async def crawl_batch(crawler: AsyncWebCrawler, urls: List[str], max_concurrent:
 async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: List[str], max_depth: int = 3, max_concurrent: int = 10) -> List[Dict[str, Any]]:
     """
     Recursively crawl internal links from start URLs up to a maximum depth.
-
+    
     Args:
         crawler: AsyncWebCrawler instance
         start_urls: List of starting URLs
         max_depth: Maximum recursion depth
         max_concurrent: Maximum number of concurrent browser sessions
-
+        
     Returns:
         List of dictionaries with URL and markdown content
     """
@@ -2054,6 +2054,18 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     current_urls = set([normalize_url(u) for u in start_urls])
     results_all = []
 
+    for depth in range(max_depth):
+        urls_to_crawl = [normalize_url(url) for url in current_urls if normalize_url(url) not in visited]
+        if not urls_to_crawl:
+            break
+
+        results = await crawler.arun_many(urls=urls_to_crawl, config=run_config, dispatcher=dispatcher)
+        next_level_urls = set()
+
+        for result in results:
+            norm_url = normalize_url(result.url)
+            visited.add(norm_url)
+            
             if result.success and result.markdown:
                 results_all.append({'url': result.url, 'markdown': result.markdown})
                 for link in result.links.get("internal", []):
