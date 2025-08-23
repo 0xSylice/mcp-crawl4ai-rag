@@ -35,8 +35,8 @@ from utils import (
     check_collections_exist,
     verify_collection_schema,
     create_collections,
-    get_chroma_client, 
-    add_documents_to_vecdb, 
+    get_chroma_client,
+    add_documents_to_vecdb,
     search_documents,
     extract_code_blocks,
     generate_code_example_summary,
@@ -61,9 +61,34 @@ except ImportError:
     AIScriptAnalyzer = None
     HallucinationReporter = None
 
+# Helper: find a .env by checking exactly three locations (in this order):
+# 1) script_dir.parent (same as project root in src/*.py)
+# 2) parent of that folder (one level above project root)
+# 3) the script's own folder (where __file__ lives)
+def find_dotenv() -> Path:
+    start = Path(__file__).resolve()        # script file
+    script_dir = start.parent               # script dir
+    candidate1 = script_dir.parent          # parent of script_dir
+    candidate2 = candidate1.parent          # parent of that folder
+    candidate3 = script_dir                 # script folder
+
+    candidates = [candidate1, candidate2, candidate3]
+
+    for candidate in candidates:
+        env_path = candidate / ".env"
+        if env_path.exists():
+            return env_path
+
+    # If no .env file is found, exit the script with an error message
+    print("Error: No .env file found in any of the expected locations:")
+    print(f"  1. {candidate1}")
+    print(f"  2. {candidate2}")
+    print(f"  3. {candidate3}")
+    print("\nPlease create a .env file in one of these locations and try again.")
+    exit(1)
+
 # Load environment variables from the project root .env file
-project_root = Path(__file__).resolve().parent.parent
-dotenv_path = project_root / '.env'
+dotenv_path = find_dotenv()
 
 # Force override of existing environment variables
 load_dotenv(dotenv_path, override=True)
@@ -93,13 +118,13 @@ def validate_script_path(script_path: str) -> Dict[str, Any]:
     """Validate script path and return error info if invalid."""
     if not script_path or not isinstance(script_path, str):
         return {"valid": False, "error": "Script path is required"}
-    
+
     if not os.path.exists(script_path):
         return {"valid": False, "error": f"Script not found: {script_path}"}
-    
+
     if not script_path.endswith('.py'):
         return {"valid": False, "error": "Only Python (.py) files are supported"}
-    
+
     try:
         # Check if file is readable
         with open(script_path, 'r', encoding='utf-8') as f:
@@ -112,17 +137,17 @@ def validate_github_url(repo_url: str) -> Dict[str, Any]:
     """Validate GitHub repository URL."""
     if not repo_url or not isinstance(repo_url, str):
         return {"valid": False, "error": "Repository URL is required"}
-    
+
     repo_url = repo_url.strip()
-    
+
     # Basic GitHub URL validation
     if not ("github.com" in repo_url.lower() or repo_url.endswith(".git")):
         return {"valid": False, "error": "Please provide a valid GitHub repository URL"}
-    
+
     # Check URL format
     if not (repo_url.startswith("https://") or repo_url.startswith("git@")):
         return {"valid": False, "error": "Repository URL must start with https:// or git@"}
-    
+
     return {"valid": True, "repo_name": repo_url.split('/')[-1].replace('.git', '')}
 
 # Create a dataclass for our application context
@@ -138,15 +163,15 @@ class Crawl4AIContext:
 async def initialize_vecdb() -> chromadb.ClientAPI:
     """
     Initialize Vector database with pre-flight checks and collection setup.
-    
+
     Returns:
         Chroma client instance
-        
+
     Raises:
         SystemExit: If Vector database server is not accessible or collections cannot be set up
     """
     print("🔍 Performing Vector database pre-flight checks...")
-    
+
     # Check if Chroma server is running
     if not check_chroma_server():
         chroma_host = os.getenv("CHROMA_HOST", "127.0.0.1")
@@ -154,9 +179,9 @@ async def initialize_vecdb() -> chromadb.ClientAPI:
         print(f"❌ Vector database server not accessible at {chroma_host}:{chroma_port}")
         print("Please ensure Vector database server is running and accessible.")
         sys.exit(1)
-    
+
     print("✅ Vector database server is accessible")
-    
+
     # Get client
     try:
         client = get_chroma_client()
@@ -164,11 +189,11 @@ async def initialize_vecdb() -> chromadb.ClientAPI:
     except Exception as e:
         print(f"❌ Failed to connect to Vector database: {e}")
         sys.exit(1)
-    
+
     # Check if required collections exist
     collections_status = check_collections_exist(client)
     missing_collections = [name for name, exists in collections_status.items() if not exists]
-    
+
     if missing_collections:
         print(f"⚠️  Missing collections: {', '.join(missing_collections)}")
         print("The following collections are required:")
@@ -176,12 +201,12 @@ async def initialize_vecdb() -> chromadb.ClientAPI:
         print("  - crawled_pages: Document chunks with embeddings")
         print("  - code_examples: Code examples with embeddings and summaries")
         print()
-        
+
         response = input("Do you want to create the missing collections? (Y/n): ").strip().lower()
         if response in ['n', 'no']:
             print("❌ Collections are required for operation. Exiting.")
             sys.exit(1)
-        
+
         print("📝 Creating missing collections...")
         if create_collections(client):
             print("✅ All collections created successfully")
@@ -190,27 +215,27 @@ async def initialize_vecdb() -> chromadb.ClientAPI:
             sys.exit(1)
     else:
         print("✅ All required collections exist")
-    
+
     # Verify collection schema
     if not verify_collection_schema(client):
         print("❌ Collection schema verification failed.")
         print("The existing collections do not match the expected structure.")
         print("Please check your Vector database setup and try again.")
         sys.exit(1)
-    
+
     print("✅ Collection schema verified")
     print("🚀 Vector database initialization complete")
-    
+
     return client
 
 @asynccontextmanager
 async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     """
     Manages the Crawl4AI client lifecycle.
-    
+
     Args:
         server: The FastMCP server instance
-        
+
     Yields:
         Crawl4AIContext: The context containing the Crawl4AI crawler and Vector database client
     """
@@ -219,14 +244,14 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
         headless=True,
         verbose=False
     )
-    
+
     # Initialize the crawler
     crawler = AsyncWebCrawler(config=browser_config)
     await crawler.__aenter__()
-    
+
     # Initialize Vector database client with pre-flight checks
     vecdb_client = await initialize_vecdb()
-    
+
     # Initialize cross-encoder model for reranking if enabled
     reranking_model = None
     if os.getenv("USE_RERANKING", "false") == "true":
@@ -235,33 +260,33 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
         except Exception as e:
             print(f"Failed to load reranking model: {e}")
             reranking_model = None
-    
+
     # Initialize Neo4j components if configured and enabled
     knowledge_validator = None
     repo_extractor = None
-    
+
     # Check if knowledge graph functionality is enabled
     knowledge_graph_enabled = os.getenv("USE_KNOWLEDGE_GRAPH", "false") == "true"
-    
+
     if knowledge_graph_enabled:
         neo4j_uri = os.getenv("NEO4J_URI")
         neo4j_user = os.getenv("NEO4J_USER")
         neo4j_password = os.getenv("NEO4J_PASSWORD")
-        
+
         if neo4j_uri and neo4j_user and neo4j_password and KnowledgeGraphValidator:
             try:
                 print("Initializing knowledge graph components...")
-                
+
                 # Initialize knowledge graph validator
                 knowledge_validator = KnowledgeGraphValidator(neo4j_uri, neo4j_user, neo4j_password)
                 await knowledge_validator.initialize()
                 print("✓ Knowledge graph validator initialized")
-                
+
                 # Initialize repository extractor
                 repo_extractor = DirectNeo4jExtractor(neo4j_uri, neo4j_user, neo4j_password)
                 await repo_extractor.initialize()
                 print("✓ Repository extractor initialized")
-                
+
             except Exception as e:
                 print(f"Failed to initialize Neo4j components: {format_neo4j_error(e)}")
                 knowledge_validator = None
@@ -270,7 +295,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
             print("Neo4j credentials not configured - knowledge graph tools will be unavailable")
     else:
         print("Knowledge graph functionality disabled - set USE_KNOWLEDGE_GRAPH=true to enable")
-    
+
     try:
         yield Crawl4AIContext(
             crawler=crawler,
@@ -307,36 +332,36 @@ mcp = FastMCP(
 def rerank_results(model: CrossEncoder, query: str, results: List[Dict[str, Any]], content_key: str = "content") -> List[Dict[str, Any]]:
     """
     Rerank search results using a cross-encoder model.
-    
+
     Args:
         model: The cross-encoder model to use for reranking
         query: The search query
         results: List of search results
         content_key: The key in each result dict that contains the text content
-        
+
     Returns:
         Reranked list of results
     """
     if not model or not results:
         return results
-    
+
     try:
         # Extract content from results
         texts = [result.get(content_key, "") for result in results]
-        
+
         # Create pairs of [query, document] for the cross-encoder
         pairs = [[query, text] for text in texts]
-        
+
         # Get relevance scores from the cross-encoder
         scores = model.predict(pairs)
-        
+
         # Add scores to results and sort by score (descending)
         for i, result in enumerate(results):
             result["rerank_score"] = float(scores[i])
-        
+
         # Sort by rerank score
         reranked = sorted(results, key=lambda x: x.get("rerank_score", 0), reverse=True)
-        
+
         return reranked
     except Exception as e:
         print(f"Error during reranking: {e}")
@@ -345,10 +370,10 @@ def rerank_results(model: CrossEncoder, query: str, results: List[Dict[str, Any]
 def is_sitemap(url: str) -> bool:
     """
     Check if a URL is a sitemap.
-    
+
     Args:
         url: URL to check
-        
+
     Returns:
         True if the URL is a sitemap, False otherwise
     """
@@ -357,10 +382,10 @@ def is_sitemap(url: str) -> bool:
 def is_txt(url: str) -> bool:
     """
     Check if a URL is a text file.
-    
+
     Args:
         url: URL to check
-        
+
     Returns:
         True if the URL is a text file, False otherwise
     """
@@ -369,10 +394,10 @@ def is_txt(url: str) -> bool:
 def parse_sitemap(sitemap_url: str) -> List[str]:
     """
     Parse a sitemap and extract URLs.
-    
+
     Args:
         sitemap_url: URL of the sitemap
-        
+
     Returns:
         List of URLs found in the sitemap
     """
@@ -436,10 +461,10 @@ def smart_chunk_markdown(text: str, chunk_size: int = 5000) -> List[str]:
 def extract_section_info(chunk: str) -> Dict[str, Any]:
     """
     Extracts headers and stats from a chunk.
-    
+
     Args:
         chunk: Markdown chunk
-        
+
     Returns:
         Dictionary with headers and stats
     """
@@ -456,10 +481,10 @@ def process_code_example(args):
     """
     Process a single code example to generate its summary.
     This function is designed to be used with concurrent.futures.
-    
+
     Args:
         args: Tuple containing (code, context_before, context_after)
-        
+
     Returns:
         The generated summary
     """
@@ -470,14 +495,14 @@ def process_code_example(args):
 async def crawl_single_page(ctx: Context, url: str) -> str:
     """
     Crawl a single web page and store its content in Vector database.
-    
+
     This tool is ideal for quickly retrieving content from a specific URL without following links.
     The content is stored in Vector database for later retrieval and querying.
-    
+
     Args:
         ctx: The MCP server provided context
         url: URL of the web page to crawl
-    
+
     Returns:
         Summary of the crawling operation and storage in Vector database
     """
@@ -485,32 +510,32 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
         # Get the crawler from the context
         crawler = ctx.request_context.lifespan_context.crawler
         vecdb_client = ctx.request_context.lifespan_context.vecdb_client
-        
+
         # Configure the crawl
         run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
-        
+
         # Crawl the page
         result = await crawler.arun(url=url, config=run_config)
-        
+
         if result.success and result.markdown:
             # Extract source_id
             source_id = extract_source_id(url)
-            
+
             # Chunk the content
             chunks = smart_chunk_markdown(result.markdown)
-            
+
             # Prepare data for Vector database
             urls = []
             chunk_numbers = []
             contents = []
             metadatas = []
             total_word_count = 0
-            
+
             for i, chunk in enumerate(chunks):
                 urls.append(url)
                 chunk_numbers.append(i)
                 contents.append(chunk)
-                
+
                 # Extract metadata
                 meta = extract_section_info(chunk)
                 meta["chunk_index"] = i
@@ -518,20 +543,20 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
                 meta["source"] = source_id
                 meta["crawl_time"] = str(asyncio.current_task().get_coro().__name__)
                 metadatas.append(meta)
-                
+
                 # Accumulate word count
                 total_word_count += meta.get("word_count", 0)
-            
+
             # Create url_to_full_document mapping
             url_to_full_document = {url: result.markdown}
-            
+
             # Update source information FIRST (before inserting documents)
             source_summary = extract_source_summary(source_id, result.markdown[:5000])  # Use first 5000 chars for summary
             update_source_info(vecdb_client, source_id, source_summary, total_word_count)
-            
+
             # Add documentation chunks to Vector database (AFTER source exists)
             add_documents_to_vecdb(vecdb_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
-            
+
             # Extract and process code examples only if enabled
             extract_code_examples = os.getenv("USE_AGENTIC_RAG", "false") == "true"
             code_blocks = []
@@ -544,23 +569,23 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
                     code_examples = []
                     code_summaries = []
                     code_metadatas = []
-                    
+
                     # Process code examples in parallel
                     with concurrent.futures.ThreadPoolExecutor(max_workers=LLM_MAX_CONCURRENCY) as executor:
                         # Prepare arguments for parallel processing
-                        summary_args = [(block['code'], block['context_before'], block['context_after']) 
+                        summary_args = [(block['code'], block['context_before'], block['context_after'])
                                         for block in code_blocks]
-                        
+
                         # Generate summaries in parallel
                         summaries = list(executor.map(process_code_example, summary_args))
-                    
+
                     # Prepare code example data
                     for i, (block, summary) in enumerate(zip(code_blocks, summaries)):
                         code_urls.append(url)
                         code_chunk_numbers.append(i)
                         code_examples.append(block['code'])
                         code_summaries.append(summary)
-                        
+
                         # Create metadata for code example
                         code_meta = {
                             "chunk_index": i,
@@ -570,17 +595,17 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
                             "word_count": len(block['code'].split())
                         }
                         code_metadatas.append(code_meta)
-                    
+
                     # Add code examples to Vector database
                     add_code_examples_to_vecdb(
-                        vecdb_client, 
-                        code_urls, 
-                        code_chunk_numbers, 
-                        code_examples, 
-                        code_summaries, 
+                        vecdb_client,
+                        code_urls,
+                        code_chunk_numbers,
+                        code_examples,
+                        code_summaries,
                         code_metadatas
                     )
-            
+
             return json.dumps({
                 "success": True,
                 "url": url,
@@ -611,21 +636,21 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
 async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concurrent: int = 10, chunk_size: int = 5000) -> str:
     """
     Intelligently crawl a URL based on its type and store content in Vector database.
-    
+
     This tool automatically detects the URL type and applies the appropriate crawling method:
     - For sitemaps: Extracts and crawls all URLs in parallel
     - For text files (llms.txt): Directly retrieves the content
     - For regular webpages: Recursively crawls internal links up to the specified depth
-    
+
     All crawled content is chunked and stored in Vector database for later retrieval and querying.
-    
+
     Args:
         ctx: The MCP server provided context
         url: URL to crawl (can be a regular webpage, sitemap.xml, or .txt file)
         max_depth: Maximum recursion depth for regular URLs (default: 3)
         max_concurrent: Maximum number of concurrent browser sessions (default: 10)
         chunk_size: Maximum size of each content chunk in characters (default: 1000)
-    
+
     Returns:
         JSON string with crawl summary and storage information
     """
@@ -633,11 +658,11 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
         # Get the crawler from the context
         crawler = ctx.request_context.lifespan_context.crawler
         vecdb_client = ctx.request_context.lifespan_context.vecdb_client
-        
+
         # Determine the crawl strategy
         crawl_results = []
         crawl_type = None
-        
+
         if is_txt(url):
             # For text files, use simple crawl
             crawl_results = await crawl_markdown_file(crawler, url)
@@ -657,44 +682,44 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             # For regular URLs, use recursive crawl
             crawl_results = await crawl_recursive_internal_links(crawler, [url], max_depth=max_depth, max_concurrent=max_concurrent)
             crawl_type = "webpage"
-        
+
         if not crawl_results:
             return json.dumps({
                 "success": False,
                 "url": url,
                 "error": "No content found"
             }, indent=2)
-        
+
         # Process results and store in Vector database
         urls = []
         chunk_numbers = []
         contents = []
         metadatas = []
         chunk_count = 0
-        
+
         # Track sources and their content
         source_content_map = {}
         source_word_counts = {}
-        
+
         # Process documentation chunks
         for doc in crawl_results:
             source_url = doc['url']
             md = doc['markdown']
             chunks = smart_chunk_markdown(md, chunk_size=chunk_size)
-            
+
             # Extract source_id
             source_id = extract_source_id(source_url)
-            
+
             # Store content for source summary generation
             if source_id not in source_content_map:
                 source_content_map[source_id] = md[:5000]  # Store first 5000 chars
                 source_word_counts[source_id] = 0
-            
+
             for i, chunk in enumerate(chunks):
                 urls.append(source_url)
                 chunk_numbers.append(i)
                 contents.append(chunk)
-                
+
                 # Extract metadata
                 meta = extract_section_info(chunk)
                 meta["chunk_index"] = i
@@ -703,26 +728,26 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                 meta["crawl_type"] = crawl_type
                 meta["crawl_time"] = str(asyncio.current_task().get_coro().__name__)
                 metadatas.append(meta)
-                
+
                 # Accumulate word count
                 source_word_counts[source_id] += meta.get("word_count", 0)
-                
+
                 chunk_count += 1
-        
+
         # Create url_to_full_document mapping
         url_to_full_document = {}
         for doc in crawl_results:
             url_to_full_document[doc['url']] = doc['markdown']
-        
+
         # Update source information for each unique source FIRST (before inserting documents)
         with concurrent.futures.ThreadPoolExecutor(max_workers=LLM_MAX_CONCURRENCY) as executor:
             source_summary_args = [(source_id, content) for source_id, content in source_content_map.items()]
             source_summaries = list(executor.map(lambda args: extract_source_summary(args[0], args[1]), source_summary_args))
-        
+
         for (source_id, _), summary in zip(source_summary_args, source_summaries):
             word_count = source_word_counts.get(source_id, 0)
             update_source_info(vecdb_client, source_id, summary, word_count)
-        
+
         # Add documentation chunks to Vector database (AFTER sources exist)
         batch_size = 20
         add_documents_to_vecdb(vecdb_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
@@ -737,32 +762,32 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             code_examples = []
             code_summaries = []
             code_metadatas = []
-            
+
             # Extract code blocks from all documents
             for doc in crawl_results:
                 source_url = doc['url']
                 md = doc['markdown']
                 code_blocks = extract_code_blocks(md)
-                
+
                 if code_blocks:
                     # Process code examples in parallel
                     with concurrent.futures.ThreadPoolExecutor(max_workers=LLM_MAX_CONCURRENCY) as executor:
                         # Prepare arguments for parallel processing
-                        summary_args = [(block['code'], block['context_before'], block['context_after']) 
+                        summary_args = [(block['code'], block['context_before'], block['context_after'])
                                         for block in code_blocks]
-                        
+
                         # Generate summaries in parallel
                         summaries = list(executor.map(process_code_example, summary_args))
-                    
+
                     # Prepare code example data
                     source_id = extract_source_id(source_url)
-                    
+
                     for i, (block, summary) in enumerate(zip(code_blocks, summaries)):
                         code_urls.append(source_url)
                         code_chunk_numbers.append(len(code_examples))  # Use global code example index
                         code_examples.append(block['code'])
                         code_summaries.append(summary)
-                        
+
                         # Create metadata for code example
                         code_meta = {
                             "chunk_index": len(code_examples) - 1,
@@ -772,19 +797,19 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                             "word_count": len(block['code'].split())
                         }
                         code_metadatas.append(code_meta)
-            
+
             # Add all code examples to Vector database
             if code_examples:
                 add_code_examples_to_vecdb(
-                    vecdb_client, 
-                    code_urls, 
-                    code_chunk_numbers, 
-                    code_examples, 
-                    code_summaries, 
+                    vecdb_client,
+                    code_urls,
+                    code_chunk_numbers,
+                    code_examples,
+                    code_summaries,
                     code_metadatas,
                     batch_size=batch_size
                 )
-        
+
         return json.dumps({
             "success": True,
             "url": url,
@@ -806,28 +831,28 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
 async def get_available_sources(ctx: Context) -> str:
     """
     Get all available sources from the sources collection.
-    
+
     This tool returns a list of all unique sources (domains) that have been crawled and stored
-    in the database, along with their summaries and statistics. This is useful for discovering 
+    in the database, along with their summaries and statistics. This is useful for discovering
     what content is available for querying.
 
     Always use this tool before calling the RAG query or code example query tool
     with a specific source filter!
-    
+
     Args:
         ctx: The MCP server provided context
-    
+
     Returns:
         JSON string with the list of available sources and their details
     """
     try:
         # Get the Vector database client from the context
         vecdb_client = ctx.request_context.lifespan_context.vecdb_client
-        
+
         # Query the sources collection directly
         collection = vecdb_client.get_collection("sources")
         results = collection.get(include=["metadatas"])
-        
+
         # Format the sources with their details
         sources = []
         if results["metadatas"]:
@@ -839,7 +864,7 @@ async def get_available_sources(ctx: Context) -> str:
                     "created_at": metadata.get("created_at"),
                     "updated_at": metadata.get("updated_at")
                 })
-        
+
         return json.dumps({
             "success": True,
             "sources": sources,
@@ -855,35 +880,35 @@ async def get_available_sources(ctx: Context) -> str:
 async def perform_rag_query(ctx: Context, query: str, source: str = None, match_count: int = 5) -> str:
     """
     Perform a RAG (Retrieval Augmented Generation) query on the stored content.
-    
+
     This tool searches the vector database for content relevant to the query and returns
     the matching documents. Optionally filter by source domain.
     Get the source by using the get_available_sources tool before calling this search!
-    
+
     Args:
         ctx: The MCP server provided context
         query: The search query
         source: Optional source domain to filter results (e.g., 'example.com')
         match_count: Maximum number of results to return (default: 5)
-    
+
     Returns:
         JSON string with the search results
     """
     try:
         # Get the Vector database client from the context
         vecdb_client = ctx.request_context.lifespan_context.vecdb_client
-        
+
         # Check if hybrid search is enabled
         use_hybrid_search = os.getenv("USE_HYBRID_SEARCH", "false") == "true"
-        
+
         # Prepare filter if source is provided and not empty
         filter_metadata = None
         if source and source.strip():
             filter_metadata = {"source_id": source}
-        
+
         if use_hybrid_search:
             # Hybrid search: combine vector and keyword search
-            
+
             # 1. Get vector search results (get more to account for filtering)
             vector_results = search_documents(
                 client=vecdb_client,
@@ -891,14 +916,14 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
                 match_count=match_count * 2,  # Get double to have room for filtering
                 filter_metadata=filter_metadata
             )
-            
+
             # 2. Get keyword search results using collection query
             collection = vecdb_client.get_collection("crawled_pages")
             all_docs = collection.get(
                 where=filter_metadata,
                 include=["documents", "metadatas"]
             )
-            
+
             # Filter documents that contain the query keywords
             keyword_results = []
             if all_docs["documents"]:
@@ -913,11 +938,11 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
                             'source_id': all_docs["metadatas"][i].get("source_id"),
                             'similarity': 0.5  # Default similarity for keyword matches
                         })
-            
+
             # 3. Combine results with preference for items appearing in both
             seen_ids = set()
             combined_results = []
-            
+
             # First, add items that appear in both searches (these are the best matches)
             vector_ids = {r.get('id') for r in vector_results if r.get('id')}
             for kr in keyword_results:
@@ -930,22 +955,22 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
                             combined_results.append(vr)
                             seen_ids.add(kr['id'])
                             break
-            
+
             # Then add remaining vector results (semantic matches without exact keyword)
             for vr in vector_results:
                 if vr.get('id') and vr['id'] not in seen_ids and len(combined_results) < match_count:
                     combined_results.append(vr)
                     seen_ids.add(vr['id'])
-            
+
             # Finally, add pure keyword matches if we still need more results
             for kr in keyword_results:
                 if kr['id'] not in seen_ids and len(combined_results) < match_count:
                     combined_results.append(kr)
                     seen_ids.add(kr['id'])
-            
+
             # Use combined results
             results = combined_results[:match_count]
-            
+
         else:
             # Standard vector search only
             results = search_documents(
@@ -954,12 +979,12 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
                 match_count=match_count,
                 filter_metadata=filter_metadata
             )
-        
+
         # Apply reranking if enabled
         use_reranking = os.getenv("USE_RERANKING", "false") == "true"
         if use_reranking and ctx.request_context.lifespan_context.reranking_model:
             results = rerank_results(ctx.request_context.lifespan_context.reranking_model, query, results, content_key="content")
-        
+
         # Format the results
         formatted_results = []
         for result in results:
@@ -973,7 +998,7 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
             if "rerank_score" in result:
                 formatted_result["rerank_score"] = result["rerank_score"]
             formatted_results.append(formatted_result)
-        
+
         return json.dumps({
             "success": True,
             "query": query,
@@ -994,19 +1019,19 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
 async def search_code_examples(ctx: Context, query: str, source_id: str = None, match_count: int = 5) -> str:
     """
     Search for code examples relevant to the query.
-    
+
     This tool searches the vector database for code examples relevant to the query and returns
     the matching examples with their summaries. Optionally filter by source_id.
     Get the source_id by using the get_available_sources tool before calling this search!
 
     Use the get_available_sources tool first to see what sources are available for filtering.
-    
+
     Args:
         ctx: The MCP server provided context
         query: The search query
         source_id: Optional source ID to filter results (e.g., 'example.com')
         match_count: Maximum number of results to return (default: 5)
-    
+
     Returns:
         JSON string with the search results
     """
@@ -1017,22 +1042,22 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
             "success": False,
             "error": "Code example extraction is disabled. Perform a normal RAG search."
         }, indent=2)
-    
+
     try:
         # Get the Vector database client from the context
         vecdb_client = ctx.request_context.lifespan_context.vecdb_client
-        
+
         # Check if hybrid search is enabled
         use_hybrid_search = os.getenv("USE_HYBRID_SEARCH", "false") == "true"
-        
+
         # Prepare filter if source is provided and not empty
         filter_metadata = None
         if source_id and source_id.strip():
             filter_metadata = {"source_id": source_id}
-        
+
         if use_hybrid_search:
             # Hybrid search: combine vector and keyword search
-            
+
             # 1. Get vector search results (get more to account for filtering)
             vector_results = search_code_examples(
                 client=vecdb_client,
@@ -1041,14 +1066,14 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
                 filter_metadata=filter_metadata,
                 source_id=source_id
             )
-            
+
             # 2. Get keyword search results using collection query
             collection = vecdb_client.get_collection("code_examples")
             all_docs = collection.get(
                 where=filter_metadata,
                 include=["documents", "metadatas"]
             )
-            
+
             # Filter documents that contain the query keywords in content or summary
             keyword_results = []
             if all_docs["documents"]:
@@ -1066,11 +1091,11 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
                             'source_id': metadata.get("source_id"),
                             'similarity': 0.5  # Default similarity for keyword matches
                         })
-            
+
             # 3. Combine results with preference for items appearing in both
             seen_ids = set()
             combined_results = []
-            
+
             # First, add items that appear in both searches (these are the best matches)
             vector_ids = {r.get('id') for r in vector_results if r.get('id')}
             for kr in keyword_results:
@@ -1083,22 +1108,22 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
                             combined_results.append(vr)
                             seen_ids.add(kr['id'])
                             break
-            
+
             # Then add remaining vector results (semantic matches without exact keyword)
             for vr in vector_results:
                 if vr.get('id') and vr['id'] not in seen_ids and len(combined_results) < match_count:
                     combined_results.append(vr)
                     seen_ids.add(vr['id'])
-            
+
             # Finally, add pure keyword matches if we still need more results
             for kr in keyword_results:
                 if kr['id'] not in seen_ids and len(combined_results) < match_count:
                     combined_results.append(kr)
                     seen_ids.add(kr['id'])
-            
+
             # Use combined results
             results = combined_results[:match_count]
-            
+
         else:
             # Standard vector search only
             results = search_code_examples(
@@ -1108,12 +1133,12 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
                 filter_metadata=filter_metadata,
                 source_id=source_id
             )
-        
+
         # Apply reranking if enabled
         use_reranking = os.getenv("USE_RERANKING", "false") == "true"
         if use_reranking and ctx.request_context.lifespan_context.reranking_model:
             results = rerank_results(ctx.request_context.lifespan_context.reranking_model, query, results, content_key="content")
-        
+
         # Format the results
         formatted_results = []
         for result in results:
@@ -1129,7 +1154,7 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
             if "rerank_score" in result:
                 formatted_result["rerank_score"] = result["rerank_score"]
             formatted_results.append(formatted_result)
-        
+
         return json.dumps({
             "success": True,
             "query": query,
@@ -1150,22 +1175,22 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
 async def check_ai_script_hallucinations(ctx: Context, script_path: str) -> str:
     """
     Check an AI-generated Python script for hallucinations using the knowledge graph.
-    
+
     This tool analyzes a Python script for potential AI hallucinations by validating
     imports, method calls, class instantiations, and function calls against a Neo4j
     knowledge graph containing real repository data.
-    
+
     The tool performs comprehensive analysis including:
     - Import validation against known repositories
     - Method call validation on classes from the knowledge graph
     - Class instantiation parameter validation
     - Function call parameter validation
     - Attribute access validation
-    
+
     Args:
         ctx: The MCP server provided context
         script_path: Absolute path to the Python script to analyze
-    
+
     Returns:
         JSON string with hallucination detection results, confidence scores, and recommendations
     """
@@ -1177,16 +1202,16 @@ async def check_ai_script_hallucinations(ctx: Context, script_path: str) -> str:
                 "success": False,
                 "error": "Knowledge graph functionality is disabled. Set USE_KNOWLEDGE_GRAPH=true in environment."
             }, indent=2)
-        
+
         # Get the knowledge validator from context
         knowledge_validator = ctx.request_context.lifespan_context.knowledge_validator
-        
+
         if not knowledge_validator:
             return json.dumps({
                 "success": False,
                 "error": "Knowledge graph validator not available. Check Neo4j configuration in environment variables."
             }, indent=2)
-        
+
         # Validate script path
         validation = validate_script_path(script_path)
         if not validation["valid"]:
@@ -1195,33 +1220,33 @@ async def check_ai_script_hallucinations(ctx: Context, script_path: str) -> str:
                 "script_path": script_path,
                 "error": validation["error"]
             }, indent=2)
-        
+
         # Step 1: Analyze script structure using AST
         if not AIScriptAnalyzer:
             return json.dumps({
                 "success": False,
                 "error": "AI script analyzer not available. Check knowledge graph module imports."
             }, indent=2)
-        
+
         analyzer = AIScriptAnalyzer()
         analysis_result = analyzer.analyze_script(script_path)
-        
+
         if analysis_result.errors:
             print(f"Analysis warnings for {script_path}: {analysis_result.errors}")
-        
+
         # Step 2: Validate against knowledge graph
         validation_result = await knowledge_validator.validate_script(analysis_result)
-        
+
         # Step 3: Generate comprehensive report
         if not HallucinationReporter:
             return json.dumps({
                 "success": False,
                 "error": "Hallucination reporter not available. Check knowledge graph module imports."
             }, indent=2)
-        
+
         reporter = HallucinationReporter()
         report = reporter.generate_comprehensive_report(validation_result)
-        
+
         # Format response with comprehensive information
         return json.dumps({
             "success": True,
@@ -1246,7 +1271,7 @@ async def check_ai_script_hallucinations(ctx: Context, script_path: str) -> str:
             },
             "libraries_analyzed": report.get("libraries_analyzed", [])
         }, indent=2)
-        
+
     except Exception as e:
         return json.dumps({
             "success": False,
@@ -1258,35 +1283,35 @@ async def check_ai_script_hallucinations(ctx: Context, script_path: str) -> str:
 async def query_knowledge_graph(ctx: Context, command: str) -> str:
     """
     Query and explore the Neo4j knowledge graph containing repository data.
-    
+
     This tool provides comprehensive access to the knowledge graph for exploring repositories,
     classes, methods, functions, and their relationships. Perfect for understanding what data
     is available for hallucination detection and debugging validation results.
-    
+
     **⚠️ IMPORTANT: Always start with the `repos` command first!**
     Before using any other commands, run `repos` to see what repositories are available
     in your knowledge graph. This will help you understand what data you can explore.
-    
+
     ## Available Commands:
-    
+
     **Repository Commands:**
     - `repos` - **START HERE!** List all repositories in the knowledge graph
     - `explore <repo_name>` - Get detailed overview of a specific repository
-    
-    **Class Commands:**  
+
+    **Class Commands:**
     - `classes` - List all classes across all repositories (limited to 20)
     - `classes <repo_name>` - List classes in a specific repository
     - `class <class_name>` - Get detailed information about a specific class including methods and attributes
-    
+
     **Method Commands:**
     - `method <method_name>` - Search for methods by name across all classes
     - `method <method_name> <class_name>` - Search for a method within a specific class
-    
+
     **Custom Query:**
     - `query <cypher_query>` - Execute a custom Cypher query (results limited to 20 records)
-    
+
     ## Knowledge Graph Schema:
-    
+
     **Node Types:**
     - Repository: `(r:Repository {name: string})`
     - File: `(f:File {path: string, module_name: string})`
@@ -1294,14 +1319,14 @@ async def query_knowledge_graph(ctx: Context, command: str) -> str:
     - Method: `(m:Method {name: string, params_list: [string], params_detailed: [string], return_type: string, args: [string]})`
     - Function: `(func:Function {name: string, params_list: [string], params_detailed: [string], return_type: string, args: [string]})`
     - Attribute: `(a:Attribute {name: string, type: string})`
-    
+
     **Relationships:**
     - `(r:Repository)-[:CONTAINS]->(f:File)`
     - `(f:File)-[:DEFINES]->(c:Class)`
     - `(c:Class)-[:HAS_METHOD]->(m:Method)`
     - `(c:Class)-[:HAS_ATTRIBUTE]->(a:Attribute)`
     - `(f:File)-[:DEFINES]->(func:Function)`
-    
+
     ## Example Workflow:
     ```
     1. repos                                    # See what repositories are available
@@ -1312,11 +1337,11 @@ async def query_knowledge_graph(ctx: Context, command: str) -> str:
     6. method __init__ Agent                    # Find Agent constructor
     7. query "MATCH (c:Class)-[:HAS_METHOD]->(m:Method) WHERE m.name = 'run' RETURN c.name, m.name LIMIT 5"
     ```
-    
+
     Args:
         ctx: The MCP server provided context
         command: Command string to execute (see available commands above)
-    
+
     Returns:
         JSON string with query results, statistics, and metadata
     """
@@ -1328,7 +1353,7 @@ async def query_knowledge_graph(ctx: Context, command: str) -> str:
                 "success": False,
                 "error": "Knowledge graph functionality is disabled. Set USE_KNOWLEDGE_GRAPH=true in environment."
             }, indent=2)
-        
+
         # Get Neo4j driver from context
         repo_extractor = ctx.request_context.lifespan_context.repo_extractor
         if not repo_extractor or not repo_extractor.driver:
@@ -1336,7 +1361,7 @@ async def query_knowledge_graph(ctx: Context, command: str) -> str:
                 "success": False,
                 "error": "Neo4j connection not available. Check Neo4j configuration in environment variables."
             }, indent=2)
-        
+
         # Parse command
         command = command.strip()
         if not command:
@@ -1345,11 +1370,11 @@ async def query_knowledge_graph(ctx: Context, command: str) -> str:
                 "command": "",
                 "error": "Command cannot be empty. Available commands: repos, explore <repo>, classes [repo], class <name>, method <name> [class], query <cypher>"
             }, indent=2)
-        
+
         parts = command.split()
         cmd = parts[0].lower()
         args = parts[1:] if len(parts) > 1 else []
-        
+
         async with repo_extractor.driver.session() as session:
             # Route to appropriate handler
             if cmd == "repos":
@@ -1398,7 +1423,7 @@ async def query_knowledge_graph(ctx: Context, command: str) -> str:
                     "command": command,
                     "error": f"Unknown command '{cmd}'. Available commands: repos, explore <repo>, classes [repo], class <name>, method <name> [class], query <cypher>"
                 }, indent=2)
-                
+
     except Exception as e:
         return json.dumps({
             "success": False,
@@ -1410,11 +1435,11 @@ async def _handle_repos_command(session, command: str) -> str:
     """Handle 'repos' command - list all repositories"""
     query = "MATCH (r:Repository) RETURN r.name as name ORDER BY r.name"
     result = await session.run(query)
-    
+
     repos = []
     async for record in result:
         repos.append(record['name'])
-    
+
     return json.dumps({
         "success": True,
         "command": command,
@@ -1433,14 +1458,14 @@ async def _handle_explore_command(session, command: str, repo_name: str) -> str:
     repo_check_query = "MATCH (r:Repository {name: $repo_name}) RETURN r.name as name"
     result = await session.run(repo_check_query, repo_name=repo_name)
     repo_record = await result.single()
-    
+
     if not repo_record:
         return json.dumps({
             "success": False,
             "command": command,
             "error": f"Repository '{repo_name}' not found in knowledge graph"
         }, indent=2)
-    
+
     # Get file count
     files_query = """
     MATCH (r:Repository {name: $repo_name})-[:CONTAINS]->(f:File)
@@ -1448,7 +1473,7 @@ async def _handle_explore_command(session, command: str, repo_name: str) -> str:
     """
     result = await session.run(files_query, repo_name=repo_name)
     file_count = (await result.single())['file_count']
-    
+
     # Get class count
     classes_query = """
     MATCH (r:Repository {name: $repo_name})-[:CONTAINS]->(f:File)-[:DEFINES]->(c:Class)
@@ -1456,7 +1481,7 @@ async def _handle_explore_command(session, command: str, repo_name: str) -> str:
     """
     result = await session.run(classes_query, repo_name=repo_name)
     class_count = (await result.single())['class_count']
-    
+
     # Get function count
     functions_query = """
     MATCH (r:Repository {name: $repo_name})-[:CONTAINS]->(f:File)-[:DEFINES]->(func:Function)
@@ -1464,7 +1489,7 @@ async def _handle_explore_command(session, command: str, repo_name: str) -> str:
     """
     result = await session.run(functions_query, repo_name=repo_name)
     function_count = (await result.single())['function_count']
-    
+
     # Get method count
     methods_query = """
     MATCH (r:Repository {name: $repo_name})-[:CONTAINS]->(f:File)-[:DEFINES]->(c:Class)-[:HAS_METHOD]->(m:Method)
@@ -1472,7 +1497,7 @@ async def _handle_explore_command(session, command: str, repo_name: str) -> str:
     """
     result = await session.run(methods_query, repo_name=repo_name)
     method_count = (await result.single())['method_count']
-    
+
     return json.dumps({
         "success": True,
         "command": command,
@@ -1494,7 +1519,7 @@ async def _handle_explore_command(session, command: str, repo_name: str) -> str:
 async def _handle_classes_command(session, command: str, repo_name: str = None) -> str:
     """Handle 'classes [repo]' command - list classes"""
     limit = 20
-    
+
     if repo_name:
         query = """
         MATCH (r:Repository {name: $repo_name})-[:CONTAINS]->(f:File)-[:DEFINES]->(c:Class)
@@ -1511,14 +1536,14 @@ async def _handle_classes_command(session, command: str, repo_name: str = None) 
         LIMIT $limit
         """
         result = await session.run(query, limit=limit)
-    
+
     classes = []
     async for record in result:
         classes.append({
             'name': record['name'],
             'full_name': record['full_name']
         })
-    
+
     return json.dumps({
         "success": True,
         "command": command,
@@ -1543,17 +1568,17 @@ async def _handle_class_command(session, command: str, class_name: str) -> str:
     """
     result = await session.run(class_query, class_name=class_name)
     class_record = await result.single()
-    
+
     if not class_record:
         return json.dumps({
             "success": False,
             "command": command,
             "error": f"Class '{class_name}' not found in knowledge graph"
         }, indent=2)
-    
+
     actual_name = class_record['name']
     full_name = class_record['full_name']
-    
+
     # Get methods
     methods_query = """
     MATCH (c:Class)-[:HAS_METHOD]->(m:Method)
@@ -1562,7 +1587,7 @@ async def _handle_class_command(session, command: str, class_name: str) -> str:
     ORDER BY m.name
     """
     result = await session.run(methods_query, class_name=class_name)
-    
+
     methods = []
     async for record in result:
         # Use detailed params if available, fall back to simple params
@@ -1572,7 +1597,7 @@ async def _handle_class_command(session, command: str, class_name: str) -> str:
             'parameters': params_to_use,
             'return_type': record['return_type'] or 'Any'
         })
-    
+
     # Get attributes
     attributes_query = """
     MATCH (c:Class)-[:HAS_ATTRIBUTE]->(a:Attribute)
@@ -1581,14 +1606,14 @@ async def _handle_class_command(session, command: str, class_name: str) -> str:
     ORDER BY a.name
     """
     result = await session.run(attributes_query, class_name=class_name)
-    
+
     attributes = []
     async for record in result:
         attributes.append({
             'name': record['name'],
             'type': record['type'] or 'Any'
         })
-    
+
     return json.dumps({
         "success": True,
         "command": command,
@@ -1616,7 +1641,7 @@ async def _handle_method_command(session, command: str, method_name: str, class_
         WHERE (c.name = $class_name OR c.full_name = $class_name)
           AND m.name = $method_name
         RETURN c.name as class_name, c.full_name as class_full_name,
-               m.name as method_name, m.params_list as params_list, 
+               m.name as method_name, m.params_list as params_list,
                m.params_detailed as params_detailed, m.return_type as return_type, m.args as args
         """
         result = await session.run(query, class_name=class_name, method_name=method_name)
@@ -1625,13 +1650,13 @@ async def _handle_method_command(session, command: str, method_name: str, class_
         MATCH (c:Class)-[:HAS_METHOD]->(m:Method)
         WHERE m.name = $method_name
         RETURN c.name as class_name, c.full_name as class_full_name,
-               m.name as method_name, m.params_list as params_list, 
+               m.name as method_name, m.params_list as params_list,
                m.params_detailed as params_detailed, m.return_type as return_type, m.args as args
         ORDER BY c.name
         LIMIT 20
         """
         result = await session.run(query, method_name=method_name)
-    
+
     methods = []
     async for record in result:
         # Use detailed params if available, fall back to simple params
@@ -1644,14 +1669,14 @@ async def _handle_method_command(session, command: str, method_name: str, class_
             'return_type': record['return_type'] or 'Any',
             'legacy_args': record['args'] or []
         })
-    
+
     if not methods:
         return json.dumps({
             "success": False,
             "command": command,
             "error": f"Method '{method_name}'" + (f" in class '{class_name}'" if class_name else "") + " not found"
         }, indent=2)
-    
+
     return json.dumps({
         "success": True,
         "command": command,
@@ -1670,7 +1695,7 @@ async def _handle_query_command(session, command: str, cypher_query: str) -> str
     try:
         # Execute the query with a limit to prevent overwhelming responses
         result = await session.run(cypher_query)
-        
+
         records = []
         count = 0
         async for record in result:
@@ -1678,7 +1703,7 @@ async def _handle_query_command(session, command: str, cypher_query: str) -> str
             count += 1
             if count >= 20:  # Limit results to prevent overwhelming responses
                 break
-        
+
         return json.dumps({
             "success": True,
             "command": command,
@@ -1691,7 +1716,7 @@ async def _handle_query_command(session, command: str, cypher_query: str) -> str
                 "limited": len(records) >= 20
             }
         }, indent=2)
-        
+
     except Exception as e:
         return json.dumps({
             "success": False,
@@ -1710,7 +1735,7 @@ OPTIONAL MATCH (f)-[:DEFINES]->(c:Class)
 OPTIONAL MATCH (c)-[:HAS_METHOD]->(m:Method)
 OPTIONAL MATCH (f)-[:DEFINES]->(func:Function)
 OPTIONAL MATCH (c)-[:HAS_ATTRIBUTE]->(a:Attribute)
-WITH r, 
+WITH r,
      count(DISTINCT f) as files_count,
      count(DISTINCT c) as classes_count,
      count(DISTINCT m) as methods_count,
@@ -1720,10 +1745,10 @@ WITH r,
 OPTIONAL MATCH (r)-[:CONTAINS]->(sample_f:File)
 WITH r, files_count, classes_count, methods_count, functions_count, attributes_count,
      collect(DISTINCT sample_f.module_name)[0..5] as sample_modules
-RETURN 
+RETURN
     r.name as repo_name,
     files_count,
-    classes_count, 
+    classes_count,
     methods_count,
     functions_count,
     attributes_count,
@@ -1733,15 +1758,15 @@ RETURN
 async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_local: bool = False) -> dict:
     """
     Analyze and store a repository in the Neo4j knowledge graph.
-    
+
     This is a shared helper function that handles both GitHub and local repository analysis.
     It validates the input, analyzes the repository, and returns detailed statistics.
-    
+
     Args:
         ctx: The MCP server context containing the repository extractor
         repo_identifier: Either a GitHub URL or a local folder path
         is_local: If True, treat repo_identifier as a local path; otherwise as a GitHub URL
-        
+
     Returns:
         dict: A dictionary containing:
             - success (bool): Whether the operation was successful
@@ -1760,17 +1785,17 @@ async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_l
             "error": "Knowledge graph functionality is disabled. Set USE_KNOWLEDGE_GRAPH=true in environment.",
             "type": "ConfigurationError"
         }
-    
+
     # Get the repository extractor from context
     repo_extractor = getattr(getattr(ctx, 'request_context', None), 'lifespan_context', None) and ctx.request_context.lifespan_context.repo_extractor
-    
+
     if not repo_extractor:
         return {
             "success": False,
             "error": "Repository extractor not available. Check Neo4j configuration in environment variables.",
             "type": "ConfigurationError"
         }
-    
+
     # Validate the repository identifier based on type
     if is_local:
         # Validate local folder path
@@ -1781,7 +1806,7 @@ async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_l
                 "folder_path": repo_identifier,
                 "type": "ValidationError"
             }
-            
+
         if not os.path.isabs(repo_identifier):
             return {
                 "success": False,
@@ -1789,7 +1814,7 @@ async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_l
                 "folder_path": repo_identifier,
                 "type": "ValidationError"
             }
-            
+
         if not os.path.exists(repo_identifier):
             return {
                 "success": False,
@@ -1797,7 +1822,7 @@ async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_l
                 "folder_path": repo_identifier,
                 "type": "ValidationError"
             }
-            
+
         if not os.path.isdir(repo_identifier):
             return {
                 "success": False,
@@ -1805,10 +1830,10 @@ async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_l
                 "folder_path": repo_identifier,
                 "type": "ValidationError"
             }
-        
+
         repo_name = os.path.basename(os.path.normpath(repo_identifier))
         repo_url = f"file://{os.path.abspath(repo_identifier)}"
-        
+
     else:
         # Validate GitHub URL
         validation = validate_github_url(repo_identifier)
@@ -1819,21 +1844,21 @@ async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_l
                 "repo_url": repo_identifier,
                 "type": "ValidationError"
             }
-        
+
         repo_name = validation["repo_name"]
         repo_url = repo_identifier
-    
+
     try:
         # Analyze the repository (includes cloning for GitHub, direct analysis for local)
         print(f"Starting repository analysis for: {repo_name}")
         await repo_extractor.analyze_repository(repo_url, temp_dir=repo_identifier if is_local else None)
         print(f"Repository analysis completed for: {repo_name}")
-        
+
         # Query Neo4j for statistics about the parsed repository
         async with repo_extractor.driver.session() as session:
             result = await session.run(REPO_STATS_QUERY, repo_name=repo_name)
             record = await result.single()
-            
+
             if not record:
                 return {
                     "success": False,
@@ -1841,7 +1866,7 @@ async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_l
                     "repo_name": repo_name,
                     "type": "AnalysisError"
                 }
-            
+
             stats = {
                 "repository": record['repo_name'],
                 "files_processed": record['files_count'] or 0,
@@ -1851,7 +1876,7 @@ async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_l
                 "attributes_created": record['attributes_count'] or 0,
                 "sample_modules": record['sample_modules'] or []
             }
-            
+
             result_data = {
                 "success": True,
                 "repo_name": repo_name,
@@ -1859,17 +1884,17 @@ async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_l
                 "stats": stats,
                 "type": "success"
             }
-            
+
             # Add the appropriate identifier field based on type
             result_data["folder_path" if is_local else "repo_url"] = repo_identifier
-            
+
             return result_data
-    
+
     except Exception as e:
         error_type = type(e).__name__
         error_msg = str(e)
         print(f"Error parsing {'local repository' if is_local else 'repository'}: {error_type}: {error_msg}", file=sys.stderr)
-        
+
         return {
             "success": False,
             "error": f"Error parsing {'local repository' if is_local else 'repository'}: {error_msg}",
@@ -1882,26 +1907,26 @@ async def _analyze_and_store_repository(ctx: Context, repo_identifier: str, is_l
 async def parse_github_repository(ctx: Context, repo_url: str) -> str:
     """
     Parse a GitHub repository into the Neo4j knowledge graph.
-    
+
     This tool clones a GitHub repository, analyzes its Python files, and stores
     the code structure (classes, methods, functions, imports) in Neo4j for use
     in hallucination detection. The tool:
-    
+
     - Clones the repository to a temporary location
     - Analyzes Python files to extract code structure
     - Stores classes, methods, functions, and imports in Neo4j
     - Provides detailed statistics about the parsing results
     - Automatically handles module name detection for imports
-    
+
     Args:
         ctx: The MCP server provided context
         repo_url: GitHub repository URL (e.g., 'https://github.com/user/repo.git')
-    
+
     Returns:
         JSON string with parsing results, statistics, and repository information
     """
     result = await _analyze_and_store_repository(ctx, repo_url, is_local=False)
-    
+
     # Add additional fields specific to GitHub repository parsing
     if result.get('success'):
         result.update({
@@ -1912,31 +1937,31 @@ async def parse_github_repository(ctx: Context, repo_url: str) -> str:
                 "The knowledge graph contains classes, methods, and functions from this repository"
             ]
         })
-    
+
     return json.dumps(result, indent=2)
 
 @mcp.tool()
 async def parse_local_repository(ctx: Context, folder_path: str) -> str:
     """
     Parse a local repository into the Neo4j knowledge graph.
-    
-    This tool analyzes a local folder containing Python code and stores the code structure 
+
+    This tool analyzes a local folder containing Python code and stores the code structure
     (classes, methods, functions, imports) in Neo4j for use in hallucination detection. The tool:
-    
+
     - Analyzes Python files in the specified folder to extract code structure
     - Stores classes, methods, functions, and imports in Neo4j
     - Provides detailed statistics about the parsing results
     - Automatically handles module name detection for imports
-    
+
     Args:
         ctx: The MCP server provided context
         folder_path: Absolute path to the local repository folder
-    
+
     Returns:
         JSON string with parsing results and statistics
     """
     result = await _analyze_and_store_repository(ctx, folder_path, is_local=True)
-    
+
     # Add additional fields specific to local repository parsing
     if result.get('success'):
         result.update({
@@ -1947,17 +1972,17 @@ async def parse_local_repository(ctx: Context, folder_path: str) -> str:
                 "The knowledge graph contains classes, methods, and functions from this repository"
             ]
         })
-    
+
     return json.dumps(result, indent=2)
 
 async def crawl_markdown_file(crawler: AsyncWebCrawler, url: str) -> List[Dict[str, Any]]:
     """
     Crawl a .txt or markdown file.
-    
+
     Args:
         crawler: AsyncWebCrawler instance
         url: URL of the file
-        
+
     Returns:
         List of dictionaries with URL and markdown content
     """
@@ -1973,12 +1998,12 @@ async def crawl_markdown_file(crawler: AsyncWebCrawler, url: str) -> List[Dict[s
 async def crawl_batch(crawler: AsyncWebCrawler, urls: List[str], max_concurrent: int = 10) -> List[Dict[str, Any]]:
     """
     Batch crawl multiple URLs in parallel.
-    
+
     Args:
         crawler: AsyncWebCrawler instance
         urls: List of URLs to crawl
         max_concurrent: Maximum number of concurrent browser sessions
-        
+
     Returns:
         List of dictionaries with URL and markdown content
     """
@@ -1995,13 +2020,13 @@ async def crawl_batch(crawler: AsyncWebCrawler, urls: List[str], max_concurrent:
 async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: List[str], max_depth: int = 3, max_concurrent: int = 10) -> List[Dict[str, Any]]:
     """
     Recursively crawl internal links from start URLs up to a maximum depth.
-    
+
     Args:
         crawler: AsyncWebCrawler instance
         start_urls: List of starting URLs
         max_depth: Maximum recursion depth
         max_concurrent: Maximum number of concurrent browser sessions
-        
+
     Returns:
         List of dictionaries with URL and markdown content
     """
@@ -2031,7 +2056,7 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
         for result in results:
             norm_url = normalize_url(result.url)
             visited.add(norm_url)
-            
+
             if result.success and result.markdown:
                 results_all.append({'url': result.url, 'markdown': result.markdown})
                 for link in result.links.get("internal", []):
@@ -2045,14 +2070,14 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
                         # prune leading / from relative path to avoid empty string later
                         if relative_path.startswith("/"):
                             relative_path = relative_path[1:]
-                        # if rel path not empty 
+                        # if rel path not empty
                         if relative_path:
                             # Trim page/file ref from norm_url (everything after last '/')
                             base_url = norm_url.rsplit('/', 1)[0]
                             # Concat proper relative path to trimmed norm_url
-                            corrected_url = f"{base_url}/{relative_path}" 
+                            corrected_url = f"{base_url}/{relative_path}"
                             # now this is sorted, we will stick with the established var names for consitency
-                            next_url = corrected_url 
+                            next_url = corrected_url
                             if next_url not in visited:
                                 next_level_urls.add(next_url)
 
