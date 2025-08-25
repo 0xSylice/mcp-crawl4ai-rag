@@ -14,7 +14,9 @@ Consider this GitHub repository a testbed, hence why I haven't been super active
 
 ## Overview
 
-This MCP server provides tools that enable AI agents to crawl websites, store content in a vector database (Supabase), and perform RAG over the crawled content. It follows the best practices for building MCP servers based on the [Mem0 MCP server template](https://github.com/coleam00/mcp-mem0/) I provided on my channel previously.
+This MCP server provides tools that enable AI agents to crawl websites, store content in a vector database (Chroma), and perform RAG over the crawled content. It follows the best practices for building MCP servers based on the [Mem0 MCP server template](https://github.com/coleam00/mcp-mem0/) I provided on my channel previously.
+
+> **Note**: This repository now uses **Chroma** as the primary vector database. For the original Supabase version, see the [`db-supabase`](https://github.com/0xSylice/mcp-crawl4ai-rag/tree/db-supabase) branch.
 
 The server includes several advanced RAG strategies that can be enabled to enhance retrieval quality:
 - **Contextual Embeddings** for enriched semantic understanding
@@ -73,9 +75,11 @@ The server provides essential web crawling and search tools:
 
 - [Docker/Docker Desktop](https://www.docker.com/products/docker-desktop/) if running the MCP server as a container (recommended)
 - [Python 3.12+](https://www.python.org/downloads/) if running the MCP server directly through uv
-- [Supabase](https://supabase.com/) (database for RAG)
+- [Chroma](https://www.trychroma.com/) (vector database for RAG - runs automatically with Docker)
 - [OpenAI API key](https://platform.openai.com/api-keys) (for generating embeddings)
 - [Neo4j](https://neo4j.com/) (optional, for knowledge graph functionality) - see [Knowledge Graph Setup](#knowledge-graph-setup) section
+
+> **Using Supabase instead?** See the [`db-supabase`](https://github.com/0xSylice/mcp-crawl4ai-rag/tree/db-supabase) branch for the original Supabase-based version.
 
 ## Installation
 
@@ -124,13 +128,9 @@ The server provides essential web crawling and search tools:
 
 ## Database Setup
 
-Before running the server, you need to set up the database with the pgvector extension:
+This server uses **Chroma** as the primary vector database, which runs automatically with Docker and requires no additional setup. The database will be created automatically when you first run the server.
 
-1. Go to the SQL Editor in your Supabase dashboard (create a new project first if necessary)
-
-2. Create a new query and paste the contents of `crawled_pages.sql`
-
-3. Run the query to create the necessary tables and functions
+> **Using Supabase instead?** If you prefer to use Supabase as your backend, switch to the [`db-supabase`](https://github.com/0xSylice/mcp-crawl4ai-rag/tree/db-supabase) branch which includes the original Supabase setup instructions.
 
 ## Knowledge Graph Setup (Optional)
 
@@ -202,14 +202,18 @@ USE_AGENTIC_RAG=false
 USE_RERANKING=false
 USE_KNOWLEDGE_GRAPH=false
 
-# Supabase Configuration
-SUPABASE_URL=your_supabase_project_url
-SUPABASE_SERVICE_KEY=your_supabase_service_key
+# Chroma Configuration (for local vector database)
+CHROMA_HOST=localhost
+CHROMA_PORT=8000
 
 # Neo4j Configuration (required for knowledge graph functionality)
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_neo4j_password
+
+# Supabase Configuration (only for db-supabase branch)
+# SUPABASE_URL=your_supabase_project_url
+# SUPABASE_SERVICE_KEY=your_supabase_service_key
 ```
 
 ### RAG Strategy Options
@@ -280,7 +284,7 @@ Once `USE_KNOWLEDGE_GRAPH=true` is set and Neo4j is running, you can:
    ```bash
    python knowledge_graphs/ai_hallucination_detector.py /path/to/your_script.py
    ```
-   
+
 These commands are also available to AI coding assistants through the parse_github_repository and check_ai_script_hallucinations tools.
 
 ### Recommended Configurations
@@ -367,7 +371,7 @@ Once you have the server running with SSE transport, you can connect to it using
 >
 > **Note for Docker users**: Use `host.docker.internal` instead of `localhost` if your client is running in a different container. This will apply if you are using this MCP server within n8n!
 
-> **Note for Claude Code users**: 
+> **Note for Claude Code users**:
 ```
 claude mcp add-json crawl4ai-rag '{"type":"http","url":"http://localhost:8051/sse"}' --scope user
 ```
@@ -385,8 +389,9 @@ Add this server to your MCP configuration for Claude Desktop, Windsurf, or any o
       "env": {
         "TRANSPORT": "stdio",
         "OPENAI_API_KEY": "your_openai_api_key",
-        "SUPABASE_URL": "your_supabase_url",
-        "SUPABASE_SERVICE_KEY": "your_supabase_service_key",
+        "CHROMA_PERSIST_DIRECTORY": "./chroma_db",
+        "CHROMA_HOST": "localhost",
+        "CHROMA_PORT": "9000",
         "USE_KNOWLEDGE_GRAPH": "false",
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",
@@ -404,21 +409,23 @@ Add this server to your MCP configuration for Claude Desktop, Windsurf, or any o
   "mcpServers": {
     "crawl4ai-rag": {
       "command": "docker",
-      "args": ["run", "--rm", "-i", 
-               "-e", "TRANSPORT", 
-               "-e", "OPENAI_API_KEY", 
-               "-e", "SUPABASE_URL", 
-               "-e", "SUPABASE_SERVICE_KEY",
+      "args": ["run", "--rm", "-i",
+               "-e", "TRANSPORT",
+               "-e", "OPENAI_API_KEY",
+               "-e", "CHROMA_PERSIST_DIRECTORY",
+               "-e", "CHROMA_HOST",
+               "-e", "CHROMA_PORT",
                "-e", "USE_KNOWLEDGE_GRAPH",
                "-e", "NEO4J_URI",
                "-e", "NEO4J_USER",
                "-e", "NEO4J_PASSWORD",
-               "mcp/crawl4ai"],
+               "mcp/crawl4ai-rag"],
       "env": {
         "TRANSPORT": "stdio",
         "OPENAI_API_KEY": "your_openai_api_key",
-        "SUPABASE_URL": "your_supabase_url",
-        "SUPABASE_SERVICE_KEY": "your_supabase_service_key",
+        "CHROMA_PERSIST_DIRECTORY": "./chroma_db",
+        "CHROMA_HOST": "localhost",
+        "CHROMA_PORT": "9000",
         "USE_KNOWLEDGE_GRAPH": "false",
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USER": "neo4j",
@@ -447,7 +454,7 @@ The Neo4j database stores code structure as:
 
 **Nodes:**
 - `Repository`: GitHub repositories
-- `File`: Python files within repositories  
+- `File`: Python files within repositories
 - `Class`: Python classes with methods and attributes
 - `Method`: Class methods with parameter information
 - `Function`: Standalone functions
@@ -474,3 +481,51 @@ This implementation provides a foundation for building more complex MCP servers 
 2. Create your own lifespan function to add your own dependencies
 3. Modify the `utils.py` file for any helper functions you need
 4. Extend the crawling capabilities by adding more specialized crawlers
+
+---
+
+## Quick Start
+
+Get up and running in 3 simple steps:
+
+### 1. Clone & Setup
+```bash
+git clone https://github.com/coleam00/mcp-crawl4ai-rag.git
+cd mcp-crawl4ai-rag
+```
+
+### 2. Configure
+Create a `.env` file with your OpenAI API key:
+```bash
+cp .env.example .env
+# Edit .env and add your OPENAI_API_KEY
+```
+
+### 3. Run
+**With Python (Recommended):**
+```bash
+uv venv && .venv\Scripts\activate
+uv pip install -e .
+crawl4ai-setup
+uv run src/crawl4ai_mcp.py
+```
+
+**With Docker (Broken?):**
+```bash
+docker build -t mcp/crawl4ai-rag .
+docker run --env-file .env -p 8051:8051 mcp/crawl4ai-rag
+```
+
+**Connect to MCP Client:**
+```json
+{
+  "mcpServers": {
+    "crawl4ai-rag": {
+      "transport": "sse",
+      "url": "http://localhost:8051/sse"
+    }
+  }
+}
+```
+
+That's it! Your server is ready to crawl and perform RAG.
