@@ -10,11 +10,11 @@ Key changes and goals in this fork:
 - Replaced Supabase as the primary backend with a Chroma DB server to make the stack much lower-resource and simpler to run locally.
 - Removed Supabase as a runtime requirement; Chroma is the default vector store for this fork.
 - Focus: a portable, local documentation / RAG server (an alternative to hosted systems like Context7) that keeps all data under the user's control.
-- This is an independent fork and will NOT be merged into Archon — The intention is to keep this project standalone and focused.
+- This is an independent fork and will NOT be merged into Archon — the intention is to keep this project standalone and focused.
 - A side branch has been created named `db-supabase` to preserve the original Supabase integration; small customizations in the Chroma-based fork are intended to be backported to that branch where appropriate to preserve cross-compatibility.
 - Caveat: Because this fork substantially changes the persistence layer, the original Docker image and Docker-based workflow may no longer work out-of-the-box for this fork. Running locally via Python/uv and a locally-run Chroma instance (or the provided chroma.yaml) is the recommended path.
 
-Please refer to the "Quick Start" secton at the bottom of the Readme.
+Please refer to the [Quick Start](#quick-start) section at the bottom of the README.
 
 <!-- END: 0xSylice FORK NOTICE -->
 <h1 align="center">Crawl4AI RAG MCP Server</h1>
@@ -522,8 +522,8 @@ cp .env.example .env
 # Reranking & Knowledge Graph have NOT BEEN TESTED in this Fork
 ```
 
-### 3. Install UV
-```
+### 3. Install `uv`
+```bash
 # This server is designed to be managed with python uv package manager
 # Run the following to install it:
 
