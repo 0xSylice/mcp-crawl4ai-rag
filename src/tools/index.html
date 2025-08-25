@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chroma Vector DB Explorer</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 2em;
+        }
+        .connection-panel {
+            padding: 20px;
+            background: #f9f9f9;
+            border-bottom: 1px solid #eee;
+        }
+        .connection-panel input {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-right: 10px;
+            font-size: 14px;
+            width: 300px;
+        }
+        .btn {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .btn:hover {
+            background: #5a67d8;
+        }
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-left: 10px;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .status.connected {
+            background: #48bb78;
+            color: white;
+        }
+        .status.disconnected {
+            background: #f56565;
+            color: white;
+        }
+        .main-content {
+            padding: 20px;
+        }
+        .collections-panel {
+            margin-bottom: 30px;
+        }
+        .collections-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .collection-card {
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 15px;
+            background: #fff;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .collection-card:hover {
+            border-color: #667eea;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.15);
+        }
+        .collection-card.selected {
+            border-color: #667eea;
+            background: #f7fafc;
+        }
+        .collection-name {
+            font-weight: bold;
+            font-size: 16px;
+            margin-bottom: 5px;
+            color: #2d3748;
+        }
+        .collection-info {
+            font-size: 12px;
+            color: #718096;
+        }
+        .collection-details {
+            margin-top: 30px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            padding: 20px;
+        }
+        .details-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .details-title {
+            font-size: 18px;
+            font-weight: bold;
+            color: #2d3748;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        .controls input[type="number"] {
+            width: 80px;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            border-radius: 4px;
+            overflow: hidden;
+            table-layout: fixed;
+        }
+        .data-table th,
+        .data-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+            word-wrap: break-word;
+            vertical-align: top;
+        }
+        .data-table th {
+            background: #f7fafc;
+            font-weight: 600;
+            color: #4a5568;
+        }
+        .data-table tr:hover {
+            background: #f7fafc;
+        }
+        /* Default 4-column layout (with metadata) */
+        .data-table.show-metadata th:nth-child(1),
+        .data-table.show-metadata td:nth-child(1) {
+            width: 10%;
+        }
+        .data-table.show-metadata th:nth-child(2),
+        .data-table.show-metadata td:nth-child(2) {
+            width: 40%;
+        }
+        .data-table.show-metadata th:nth-child(3),
+        .data-table.show-metadata td:nth-child(3) {
+            width: 35%;
+        }
+        .data-table.show-metadata th:nth-child(4),
+        .data-table.show-metadata td:nth-child(4) {
+            width: 15%;
+        }
+
+        /* 3-column layout (without metadata) */
+        .data-table.hide-metadata th:nth-child(1),
+        .data-table.hide-metadata td:nth-child(1) {
+            width: 10%;
+        }
+        .data-table.hide-metadata th:nth-child(2),
+        .data-table.hide-metadata td:nth-child(2) {
+            width: 75%;
+        }
+        .data-table.hide-metadata th:nth-child(3),
+        .data-table.hide-metadata td:nth-child(3) {
+            width: 15%;
+        }
+        .metadata {
+            font-size: 12px;
+            background: #edf2f7;
+            padding: 4px 8px;
+            border-radius: 4px;
+            margin: 2px;
+            display: inline-block;
+        }
+        .document-text {
+            word-wrap: break-word;
+            white-space: pre-wrap;
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        .id-text {
+            word-wrap: break-word;
+            font-family: monospace;
+            font-size: 11px;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #718096;
+        }
+        .error {
+            color: #e53e3e;
+            background: #fed7d7;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #718096;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Chroma Database Browser</h1>
+            <p>Browse collections and query your Chroma vector database</p>
+        </div>
+
+        <div class="connection-panel">
+            <input type="text" id="serverUrl" placeholder="Chroma server URL" value="http://127.0.0.1:9000">
+            <button class="btn" id="connectBtn" onclick="connectToChroma()">Connect</button>
+            <button class="btn" id="heartbeatBtn" onclick="checkHeartbeat()" disabled>Test Connection</button>
+            <span class="status disconnected" id="connectionStatus">Disconnected</span>
+        </div>
+
+        <div class="main-content">
+            <div class="collections-panel">
+                <h2>Collections</h2>
+                <button class="btn" id="loadCollectionsBtn" onclick="loadCollections()" disabled>Load Collections</button>
+                <div class="collections-list" id="collectionsList">
+                    <div class="empty-state">Connect to Chroma and load collections to get started</div>
+                </div>
+            </div>
+
+            <div class="collection-details" id="collectionDetails" style="display: none;">
+                <div class="details-header">
+                    <div class="details-title" id="selectedCollectionName">Collection Details</div>
+                    <div class="controls">
+                        <label>Limit: <input type="number" id="limitInput" value="25" min="1" max="100"></label>
+                        <label>Offset: <input type="number" id="offsetInput" value="0" min="0"></label>
+                        <button class="btn" onclick="previousPage()">◀ Previous</button>
+                        <button class="btn" onclick="nextPage()">Next ▶</button>
+                        <button class="btn" onclick="loadCollectionData()">Refresh Data</button>
+                        <button class="btn" id="toggleMetadataBtn" onclick="toggleMetadata()">Hide Metadata</button>
+                    </div>
+                </div>
+
+                <div id="collectionDataContainer">
+                    <div class="loading">Loading collection data...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="utils.js"></script>
+    <script>
+        let currentChromaUrl = '';
+        let selectedCollection = null;
+        let collections = [];
+        let showMetadata = true; // Track metadata visibility state
+
+        function connectToChroma() {
+            const url = document.getElementById('serverUrl').value.trim();
+            if (!url) {
+                alert('Please enter a Chroma server URL');
+                return;
+            }
+
+            currentChromaUrl = url.endsWith('/') ? url.slice(0, -1) : url;
+            updateConnectionStatus(true, 'Connecting...');
+
+            checkHeartbeat();
+        }
+
+        async function checkHeartbeat() {
+            try {
+                const isConnected = await ChromaUtils.testConnection(currentChromaUrl);
+                updateConnectionStatus(isConnected, isConnected ? 'Connected' : 'Connection failed');
+
+                if (isConnected) {
+                    document.getElementById('loadCollectionsBtn').disabled = false;
+                    document.getElementById('heartbeatBtn').disabled = false;
+                    // Show success message
+                    showTemporaryMessage('✓ Connection successful!', 'success');
+                    // Auto-load collections after successful connection
+                    setTimeout(() => autoLoadCollections(), 500); // Small delay to let UI update
+                } else {
+                    document.getElementById('loadCollectionsBtn').disabled = true;
+                    showTemporaryMessage('✗ Connection failed!', 'error');
+                }
+            } catch (error) {
+                updateConnectionStatus(false, 'Connection failed');
+                document.getElementById('loadCollectionsBtn').disabled = true;
+                showTemporaryMessage('✗ Connection error: ' + error.message, 'error');
+            }
+        }
+
+        function showTemporaryMessage(message, type) {
+            // Remove any existing messages
+            const existingMsg = document.querySelector('.temp-message');
+            if (existingMsg) existingMsg.remove();
+
+            // Create new message
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `temp-message ${type}`;
+            msgDiv.textContent = message;
+            msgDiv.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                padding: 10px 20px;
+                border-radius: 4px;
+                color: white;
+                font-weight: bold;
+                z-index: 1000;
+                background: ${type === 'success' ? '#48bb78' : '#f56565'};
+            `;
+
+            document.body.appendChild(msgDiv);
+
+            // Remove after 3 seconds
+            setTimeout(() => {
+                if (msgDiv.parentNode) {
+                    msgDiv.parentNode.removeChild(msgDiv);
+                }
+            }, 3000);
+        }
+
+        function previousPage() {
+            const offsetInput = document.getElementById('offsetInput');
+            const limitInput = document.getElementById('limitInput');
+            const limit = parseInt(limitInput.value) || 25;
+            const currentOffset = parseInt(offsetInput.value) || 0;
+
+            const newOffset = Math.max(0, currentOffset - limit);
+            offsetInput.value = newOffset;
+            loadCollectionData();
+        }
+
+        function nextPage() {
+            const offsetInput = document.getElementById('offsetInput');
+            const limitInput = document.getElementById('limitInput');
+            const limit = parseInt(limitInput.value) || 25;
+            const currentOffset = parseInt(offsetInput.value) || 0;
+
+            offsetInput.value = currentOffset + limit;
+            loadCollectionData();
+        }
+
+        function updateConnectionStatus(connected, message) {
+            const status = document.getElementById('connectionStatus');
+            status.textContent = message;
+            status.className = `status ${connected ? 'connected' : 'disconnected'}`;
+
+            const connectBtn = document.getElementById('connectBtn');
+            connectBtn.disabled = connected;
+        }
+
+        async function loadCollections() {
+            const container = document.getElementById('collectionsList');
+            container.innerHTML = '<div class="loading">Loading collections...</div>';
+
+            try {
+                collections = await ChromaUtils.listCollections(currentChromaUrl);
+                displayCollections(collections);
+            } catch (error) {
+                container.innerHTML = `<div class="error">Failed to load collections: ${error.message}</div>`;
+            }
+        }
+
+        function displayCollections(collections) {
+            const container = document.getElementById('collectionsList');
+
+            if (collections.length === 0) {
+                container.innerHTML = '<div class="empty-state">No collections found</div>';
+                return;
+            }
+
+            container.innerHTML = collections.map(collection => `
+                <div class="collection-card" onclick="selectCollection('${collection.id}')">
+                    <div class="collection-name">${collection.name}</div>
+                    <div class="collection-info">
+                        ID: ${collection.id}<br>
+                        ${collection.metadata ? `Metadata: ${Object.keys(collection.metadata).length} fields` : 'No metadata'}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function selectCollection(collectionId) {
+            selectedCollection = collections.find(c => c.id === collectionId);
+            if (!selectedCollection) return;
+
+            // Update UI
+            document.querySelectorAll('.collection-card').forEach(card => {
+                card.classList.remove('selected');
+            });
+            event.target.closest('.collection-card').classList.add('selected');
+
+            document.getElementById('selectedCollectionName').textContent = `Collection: ${selectedCollection.name}`;
+            document.getElementById('collectionDetails').style.display = 'block';
+
+            // Load collection data
+            await loadCollectionData();
+        }
+
+        async function loadCollectionData() {
+            if (!selectedCollection) return;
+
+            const container = document.getElementById('collectionDataContainer');
+            container.innerHTML = '<div class="loading">Loading collection data...</div>';
+
+            const limit = parseInt(document.getElementById('limitInput').value) || 25;
+            const offset = parseInt(document.getElementById('offsetInput').value) || 0;
+
+            try {
+                const includeFields = showMetadata ?
+                    ["metadatas", "documents", "embeddings"] :
+                    ["documents", "embeddings"];
+
+                const data = await ChromaUtils.getCollectionData(currentChromaUrl, selectedCollection.id, {
+                    limit,
+                    offset,
+                    include: includeFields
+                });
+                displayCollectionData(data);
+            } catch (error) {
+                container.innerHTML = `<div class="error">Failed to load collection data: ${error.message}</div>`;
+            }
+        }
+
+        function toggleMetadata() {
+            showMetadata = !showMetadata;
+            const toggleBtn = document.getElementById('toggleMetadataBtn');
+            toggleBtn.textContent = showMetadata ? 'Hide Metadata' : 'Show Metadata';
+
+            // Reload current data with new metadata setting
+            loadCollectionData();
+        }
+
+        function displayCollectionData(data, isPreview = false) {
+            const container = document.getElementById('collectionDataContainer');
+
+            if (!data.ids || data.ids.length === 0) {
+                container.innerHTML = '<div class="empty-state">No data found in this collection</div>';
+                return;
+            }
+
+            const metadataStatus = showMetadata ? 'with metadata' : 'without metadata';
+            let html = `
+                <div style="margin-bottom: 15px; font-weight: bold;">
+                    Found ${data.ids.length} items (${metadataStatus})
+                </div>
+                <table class="data-table ${showMetadata ? 'show-metadata' : 'hide-metadata'}">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Document</th>
+                            ${showMetadata ? '<th>Metadata</th>' : ''}
+                            <th>Embedding</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            for (let i = 0; i < data.ids.length; i++) {
+                const id = data.ids[i];
+                const document = data.documents ? data.documents[i] : 'N/A';
+                const metadata = data.metadatas ? data.metadatas[i] : null;
+                const embedding = data.embeddings ? data.embeddings[i] : null;
+
+                html += `
+                    <tr>
+                        <td><div class="id-text">${id}</div></td>
+                        <td>
+                            <div class="document-text">
+                                ${document || 'No document'}
+                            </div>
+                        </td>
+                        ${showMetadata ? `
+                        <td>
+                            ${metadata ? Object.entries(metadata).sort((a, b) => a[0].localeCompare(b[0])).map(([key, value]) =>
+                                `<span class="metadata">${key}: ${value}</span>`
+                            ).join(' ') : 'No metadata'}
+                        </td>
+                        ` : ''}
+                        <td>
+                            ${embedding ? `Vector (${embedding.length}D)` : 'No embedding'}
+                        </td>
+                    </tr>
+                `;
+            }
+
+            html += `
+                    </tbody>
+                </table>
+            `;
+
+            container.innerHTML = html;
+        }
+
+        // Auto-connect and load collections on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            // Set the current URL from the default input value
+            currentChromaUrl = document.getElementById('serverUrl').value.trim();
+
+            if (currentChromaUrl) {
+                console.log('Auto-connecting to:', currentChromaUrl);
+                // Auto-connect on page load
+                connectToChroma();
+            }
+        });
+
+        // Auto-load collections after successful connection
+        async function autoLoadCollections() {
+            try {
+                collections = await ChromaUtils.listCollections(currentChromaUrl);
+                displayCollections(collections);
+                showTemporaryMessage('✓ Collections loaded automatically!', 'success');
+            } catch (error) {
+                console.log('Could not auto-load collections:', error.message);
+                // Don't show error message for auto-load failure
+            }
+        }
+    </script>
+</body>
+</html>
