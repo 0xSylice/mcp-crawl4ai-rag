@@ -93,6 +93,11 @@ dotenv_path = find_dotenv()
 # Force override of existing environment variables
 load_dotenv(dotenv_path, override=True)
 
+# This global variable will hold the Chroma client after it's initialized.
+# This allows main() to initialize it before the server starts, and the
+# lifespan manager to access it once the server is running.
+vecdb_client: Optional[chromadb.ClientAPI] = None
+
 # Helper functions for Neo4j validation and error handling
 def validate_neo4j_connection() -> bool:
     """Check if Neo4j environment variables are configured."""
@@ -239,6 +244,13 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     Yields:
         Crawl4AIContext: The context containing the Crawl4AI crawler and Vector database client
     """
+    global vecdb_client
+    # The vecdb_client is already initialized in main() before the server starts.
+    # We just use the global instance here.
+    if not vecdb_client:
+        print("❌ FATAL: Vector database client not initialized. Exiting.")
+        sys.exit(1)
+
     # Create browser configuration
     browser_config = BrowserConfig(
         headless=True,
@@ -248,9 +260,6 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     # Initialize the crawler
     crawler = AsyncWebCrawler(config=browser_config)
     await crawler.__aenter__()
-
-    # Initialize Vector database client with pre-flight checks
-    vecdb_client = await initialize_vecdb()
 
     # Initialize cross-encoder model for reranking if enabled
     reranking_model = None
@@ -2020,13 +2029,13 @@ async def crawl_batch(crawler: AsyncWebCrawler, urls: List[str], max_concurrent:
 async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: List[str], max_depth: int = 3, max_concurrent: int = 10) -> List[Dict[str, Any]]:
     """
     Recursively crawl internal links from start URLs up to a maximum depth.
-    
+
     Args:
         crawler: AsyncWebCrawler instance
         start_urls: List of starting URLs
         max_depth: Maximum recursion depth
         max_concurrent: Maximum number of concurrent browser sessions
-        
+
     Returns:
         List of dictionaries with URL and markdown content
     """
@@ -2065,12 +2074,12 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
         for result in results:
             norm_url = normalize_url(result.url)
             visited.add(norm_url)
-            
+
             if result.success and result.markdown:
                 results_all.append({'url': result.url, 'markdown': result.markdown})
                 for link in result.links.get("internal", []):
                     link_href = link["href"]
-                    
+
                     # Handle different types of internal links
                     if link_href.startswith('http'):
                         # Absolute URL - use as is if it's on the same domain
@@ -2082,7 +2091,7 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
                         # Relative URL - resolve against current URL
                         from urllib.parse import urljoin
                         next_url = normalize_url(urljoin(norm_url, link_href))
-                    
+
                     # Only add if it's on the same domain and not already visited
                     if next_url.startswith(base_domain) and next_url not in visited:
                         next_level_urls.add(next_url)
@@ -2092,6 +2101,12 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     return results_all
 
 async def main():
+    global vecdb_client
+    # Initialize Vector database client with pre-flight checks BEFORE starting the server.
+    # The initialize_vecdb() function will call sys.exit(1) if it fails,
+    # preventing the server from starting.
+    vecdb_client = await initialize_vecdb()
+
     transport = os.getenv("TRANSPORT", "sse")
     if transport == 'sse':
         # Run the MCP server with sse transport
