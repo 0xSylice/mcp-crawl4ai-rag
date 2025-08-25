@@ -1,3 +1,22 @@
+<!-- START: 0xSylice FORK NOTICE -->
+
+<p align="center">
+  <strong>Fork Notice — 0xSylice's Customizations</strong>
+</p>
+
+This repository is a fork of coleam00's Crawl4AI RAG MCP Server repurposed as a lightweight, local-first "documentation server" for running and storing RAG data entirely locally. The remainder of this README preserves the original author's documentation and feature descriptions — read on for the original Crawl4AI details.
+
+Key changes and goals in this fork:
+- Replaced Supabase as the primary backend with a Chroma DB server to make the stack much lower-resource and simpler to run locally.
+- Removed Supabase as a runtime requirement; Chroma is the default vector store for this fork.
+- Focus: a portable, local documentation / RAG server (an alternative to hosted systems like Context7) that keeps all data under the user's control.
+- This is an independent fork and will NOT be merged into Archon — The intention is to keep this project standalone and focused.
+- A side branch has been created named `db-supabase` to preserve the original Supabase integration; small customizations in the Chroma-based fork are intended to be backported to that branch where appropriate to preserve cross-compatibility.
+- Caveat: Because this fork substantially changes the persistence layer, the original Docker image and Docker-based workflow may no longer work out-of-the-box for this fork. Running locally via Python/uv and a locally-run Chroma instance (or the provided chroma.yaml) is the recommended path.
+
+Please refer to the "Quick Start" secton at the bottom of the Readme.
+
+<!-- END: 0xSylice FORK NOTICE -->
 <h1 align="center">Crawl4AI RAG MCP Server</h1>
 
 <p align="center">
@@ -490,7 +509,7 @@ Get up and running in 3 simple steps:
 
 ### 1. Clone & Setup
 ```bash
-git clone https://github.com/coleam00/mcp-crawl4ai-rag.git
+git clone https://github.com/0xSylice/mcp-crawl4ai-rag.git
 cd mcp-crawl4ai-rag
 ```
 
@@ -499,9 +518,25 @@ Create a `.env` file with your OpenAI API key:
 ```bash
 cp .env.example .env
 # Edit .env and add your OPENAI_API_KEY
+# Recommend enabling: Conextual Embeddings, Hybrid Search & Agentic RAG
+# Reranking & Knowledge Graph have NOT BEEN TESTED in this Fork
 ```
 
-### 3. Run
+### 3. Install UV
+```
+# This server is designed to be managed with python uv package manager
+# Run the following to install it:
+
+# On macOS and Linux.
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# On Windows.
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Visit https://github.com/astral-sh/uv for further details
+```
+
+### 4. Run
 **With Python (Recommended):**
 ```bash
 uv venv && .venv\Scripts\activate
@@ -516,6 +551,8 @@ uv run src/crawl4ai_mcp.py
 docker build -t mcp/crawl4ai-rag .
 docker run --env-file .env -p 8051:8051 mcp/crawl4ai-rag
 ```
+
+### 5. Connect to MCP
 
 **Connect to MCP Client:**
 ```json
