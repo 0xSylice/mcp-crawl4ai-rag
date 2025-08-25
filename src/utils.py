@@ -288,7 +288,7 @@ Please give a short succinct context to situate this chunk within the overall do
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
-            max_tokens=200
+            max_completion_tokens=200
         )
 
         # Extract the generated context
@@ -682,7 +682,7 @@ Based on the code example and its surrounding context, provide a concise summary
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
-            max_tokens=100
+            max_completion_tokens=100
         )
 
         return response.choices[0].message.content.strip()
@@ -920,7 +920,7 @@ The above content is from the documentation for '{source_id}'. Please provide a 
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
-            max_tokens=150
+            max_completion_tokens=150
         )
 
         # Extract the generated summary
