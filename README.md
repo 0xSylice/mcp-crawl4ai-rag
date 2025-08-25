@@ -507,6 +507,7 @@ cp .env.example .env
 uv venv && .venv\Scripts\activate
 uv pip install -e .
 crawl4ai-setup
+chroma run chroma.yaml
 uv run src/crawl4ai_mcp.py
 ```
 
