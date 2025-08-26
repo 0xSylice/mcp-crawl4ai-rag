@@ -254,7 +254,8 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     # Create browser configuration
     browser_config = BrowserConfig(
         headless=True,
-        verbose=False
+        verbose=False,
+        timeout=30_000
     )
 
     # Initialize the crawler
